@@ -1,0 +1,89 @@
+{
+ "_captured": "2026-07-08 G0-c 계약 스냅샷(농구 자산·구 이웃-투영 구현)",
+ "_asset_id": "018f0000-0000-7000-8000-000000000264",
+ "project_asset_topics_shape": [
+  {
+   "topic_ko": "스포츠·레저",
+   "subtopic_ko": "농구",
+   "topic_en": "sports_leisure",
+   "subtopic_en": "basketball",
+   "weight": 1
+  },
+  {
+   "topic_ko": "스포츠·레저",
+   "subtopic_ko": "배드민턴",
+   "topic_en": "sports_leisure",
+   "subtopic_en": "badminton",
+   "weight": 1
+  },
+  {
+   "topic_ko": "스포츠·레저",
+   "subtopic_ko": "축구",
+   "topic_en": "sports_leisure",
+   "subtopic_en": "soccer",
+   "weight": 1
+  }
+ ],
+ "find_topic_neighbor_groups_shape": [
+  {
+   "topic_ko": "스포츠·레저",
+   "asset_count": 6,
+   "subtopics": [
+    {
+     "subtopic_ko": "배드민턴",
+     "asset_count": 3,
+     "assets": [
+      {
+       "asset_id": "018f0000-0000-7000-8000-000000000266",
+       "file_name": "018f0000-0000-7000-8000-000000000266__2025 국대 선발전 1위 기동주 선수와 경기했습니다_(배드민턴).mp4",
+       "modality": "video",
+       "already_linked": true
+      },
+      {
+       "asset_id": "018f0000-0000-7000-8000-000000000265",
+       "file_name": "018f0000-0000-7000-8000-000000000265__2012_BWF_logo_(배드민턴).svg",
+       "modality": "image",
+       "already_linked": false
+      },
+      {
+       "asset_id": "018f0000-0000-7000-8000-000000000269",
+       "file_name": "018f0000-0000-7000-8000-000000000269__[SUB] 배드민턴 모든 수비의 시작은 ‘이것’입니다_(배드민턴).mp3",
+       "modality": "audio",
+       "already_linked": false
+      }
+     ]
+    },
+    {
+     "subtopic_ko": "농구",
+     "asset_count": 2,
+     "assets": [
+      {
+       "asset_id": "018f0000-0000-7000-8000-000000000270",
+       "file_name": "018f0000-0000-7000-8000-000000000270__wikipedia_농구_5166.txt",
+       "modality": "text",
+       "already_linked": true
+      },
+      {
+       "asset_id": "018f0000-0000-7000-8000-000000000268",
+       "file_name": "018f0000-0000-7000-8000-000000000268__Kim_Tae-sul_(농구).JPG",
+       "modality": "image",
+       "already_linked": false
+      }
+     ]
+    },
+    {
+     "subtopic_ko": "축구",
+     "asset_count": 1,
+     "assets": [
+      {
+       "asset_id": "018f0000-0000-7000-8000-000000000267",
+       "file_name": "018f0000-0000-7000-8000-000000000267__Danwon-Ssireum_(씨름).jpg",
+       "modality": "image",
+       "already_linked": true
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
