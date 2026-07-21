@@ -11,8 +11,14 @@ dependencies = [
     # ⚠️ 코어(src.*)는 여기 핀하지 않는다 — README §9 대로 별도 설치:
     #   설치형: pip install "meta-extract @ git+https://github.com/OWNER/dataplatform-core.git@<tag>"
     #   참조형: pip install -e /path/to/dataplatform-core
-    # 파이프라인 런타임 ML 의존(torch·opencv·faster-whisper·scenedetect·librosa 등)은 requirements.txt(도커 빌드) 참조.
-    # (PyPI 미배포·두 설치 방식 유연성 위해 여기선 핀하지 않는다 — 백엔드 레포 pyproject 관례와 동일.)
+    # 코어를 설치하면 코어 런타임(psycopg·numpy·torch·transformers·pillow·opensearch-py 등)이
+    # **전이로** 온다 → 여기엔 코어가 제공하지 않는 '파이프라인 전용'만 나열(AST 스캔 근거·078 일원화).
+    # ※ apache-airflow 는 베이스 이미지(apache/airflow)가 제공하므로 어느 목록에도 없다(핀 충돌 방지).
+    "opencv-python>=4.9.0",   # processing/preprocess (cv2 — 키프레임 dedup·video_keyframes)
+    "faster-whisper>=1.0.0",  # processing/preprocess/stt.py (STT)
+    "scenedetect>=0.6.2",     # processing/preprocess/video_keyframes.py (장면 분할)
+    "soundfile>=0.12.1",      # processing/extractors/audio_meta_extractor.py
+    "pytesseract>=0.3.10",    # processing/classify/text_probe.py (이미지 OCR·lazy import)
 ]
 
 [tool.setuptools.packages.find]
