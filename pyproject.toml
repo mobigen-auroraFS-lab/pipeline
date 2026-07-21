@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dataflatform-pipeline"
+version = "0.1.0"
+description = "멀티모달 데이터 통합 플랫폼 — 처리 파이프라인(Airflow: 수집·분류·추출·임베딩·적재·색인·관계 생성)"
+requires-python = ">=3.11"
+dependencies = [
+    # ⚠️ 코어(src.*)는 여기 핀하지 않는다 — README §9 대로 별도 설치:
+    #   설치형: pip install "meta-extract @ git+https://github.com/OWNER/dataplatform-core.git@<tag>"
+    #   참조형: pip install -e /path/to/dataplatform-core
+    # 파이프라인 런타임 ML 의존(torch·opencv·faster-whisper·scenedetect·librosa 등)은 requirements.txt(도커 빌드) 참조.
+    # (PyPI 미배포·두 설치 방식 유연성 위해 여기선 핀하지 않는다 — 백엔드 레포 pyproject 관례와 동일.)
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["processing*"]
+
+[tool.ruff]
+line-length = 100
+lint.ignore = ["E501"]  # 코어 레포 관례와 동일(한국어 주석 다수·E501 무시)
+
+[tool.ruff.lint.isort]
+known-first-party = ["processing", "src"]  # 파이프라인(processing)·코어(src) 모두 first-party 정렬
