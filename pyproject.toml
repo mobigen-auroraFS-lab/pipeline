@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "dataflatform-pipeline"
 version = "0.1.0"
 description = "멀티모달 데이터 통합 플랫폼 — 처리 파이프라인(Airflow: 수집·분류·추출·임베딩·적재·색인·관계 생성)"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
     # ⚠️ 코어(src.*)는 여기 핀하지 않는다 — README §9 대로 별도 설치:
     #   설치형: pip install "meta-extract @ git+https://github.com/OWNER/dataplatform-core.git@<tag>"

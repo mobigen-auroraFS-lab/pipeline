@@ -201,8 +201,8 @@ def run_relations(
     *,
     db: PostgresUtil,
     top_k: int | None = None,
-    # 036: 관계 후보는 bge-only(st_bge) 기본 — 4모달리티가 캡션으로 공유하는 단일 텍스트 공간.
-    # 'both'(st_bge+clip)는 텍스트·시각 코사인을 MAX로 섞어 척도가 달라 emb_score 의미가 흐려진다.
+    # 036: 관계 후보 임베딩 채널 기본은 "st"(BGE 텍스트 임베더) — 4모달리티가 캡션으로 공유하는 단일
+    # 텍스트 공간을 쓴다. 'both'(st+clip)는 텍스트·시각 코사인을 MAX 로 섞어 척도가 달라 emb_score 가 흐려진다.
     embedding_kind: EmbeddingKindFilter = "st",
     max_attempts: int | None = None,
     _domain_fn: Callable[[PostgresUtil, str], str] | None = None,
