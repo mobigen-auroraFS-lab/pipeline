@@ -82,7 +82,8 @@ start_one() {
   printf '  ▶ %-13s pid %-7s → %s\n' "$name" "$pid" "$RUN_DIR/$name.log"
 }
 stop_one() {
-  local name="$1" pidf="$RUN_DIR/$name.pid" pid
+  local name="$1"                       # name 먼저 선언(set -u: 같은 local 문서 $name 자기참조 금지)
+  local pidf="$RUN_DIR/$name.pid" pid
   if [[ ! -f "$pidf" ]]; then printf '  - %-13s pid 없음(미기동?)\n' "$name"; return; fi
   pid="$(cat "$pidf")"
   if ! kill -0 "$pid" 2>/dev/null; then printf '  - %-13s 이미 종료\n' "$name"; rm -f "$pidf"; return; fi
