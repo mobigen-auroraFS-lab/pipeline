@@ -18,7 +18,10 @@
     2. **고착(crash) 자산 = received 리셋 후 재처리**. 비종료(routing/classifying/extracting)로
        임계시간 넘게 고착된 자산은 ``claim_asset(expected=<고착상태>, next='received')`` 조건부 UPDATE 로
        received 로 되돌린 뒤 다음 처리에서 재처리한다(재추출은 결정적·해시 dedup 이 중복 흡수).
-       resumable process_asset(복잡)보다 이 리셋(단순·멱등)을 택한다.
+       resumable process_asset(복잡)보다 이 리셋(단순·멱등)을 택한다. **단, 리셋도 재시도 cap 대상이다**
+       (``ingest.reset.v1`` 기록·실패 수와 합산): 하드 크래시로 예외 핸들러(#3)가 못 도는 자산이 무한
+       리셋·재처리하며 배치 선두를 점유(head-of-line 정체)하지 않도록, 누적 복구 시도가 cap 이상이면
+       received 대신 ``failed`` 로 격리한다.
     3. **재시도 cap**: 자산 처리 중 예외를 잡으면 ``ingest.failed.v1`` lineage 기록 +
        ``failure_count`` ≥ N 이면 ``mark_failed``(종료 격리), 미만이면 비종료로 두어 다음 run 고착스캔이
        received 로 리셋·재처리한다. 한 자산 예외가 배치 루프를 멈추지 않는다(자산별 try).
@@ -48,6 +51,13 @@ _LOG = logging.getLogger("meta_extract.batch_runner")
 
 # 재시도 cap 카운트 소스 — 자산 처리 실패 활동(run_ingest CLI·dag_process 공통 기록).
 FAILED_ACTIVITY = "ingest.failed.v1"
+
+# 크래시 루프 cap 카운트 소스 — 고착 자산의 received 리셋 활동. 하드 크래시(OOM-kill/SIGKILL/
+# 네이티브 segfault)는 예외 핸들러(_handle_failure)가 못 돌아 FAILED_ACTIVITY 가 안 남으므로,
+# 리셋마다 이 활동을 남겨 실패 수와 합산해 무한 재처리를 차단한다(불변식 #2·#3 통합).
+RESET_ACTIVITY = "ingest.reset.v1"
+# 리셋 cap 도달 시 종료 격리 사유 — 비식별(헌법 10조·예외 메시지/경로 없음).
+RESET_CAP_REASON = "reset_cap_exceeded"
 
 # 비종료(고착 재스캔 대상) 상태 — 종료 계열(registered/failed/deferred)의 여집합(불변식 #4).
 _NON_TERMINAL = (AssetStatus.ROUTING, AssetStatus.CLASSIFYING, AssetStatus.EXTRACTING)
@@ -165,6 +175,21 @@ def failure_count(conn: Connection[Any], asset_id: uuid.UUID) -> int:
         return int(cur.fetchone()[0])
 
 
+def recovery_attempt_count(conn: Connection[Any], asset_id: uuid.UUID) -> int:
+    """복구 시도 누적 = ``ingest.failed.v1``(잡힌 예외) + ``ingest.reset.v1``(고착 리셋).
+
+    소프트 실패는 ``_handle_failure`` 가 세지만, 하드 크래시(프로세스 사망)는 핸들러가 못 돌아
+    실패 lineage 가 안 남는다 — 대신 다음 run 고착 리셋이 ``ingest.reset.v1`` 을 남기므로, 둘을
+    합산한 값이 크래시 루프까지 포함한 실질 재시도 횟수다(``reset_stuck_assets`` 의 cap 소스).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM asset_lineage WHERE asset_id = %s AND activity IN (%s, %s)",
+            (asset_id, FAILED_ACTIVITY, RESET_ACTIVITY),
+        )
+        return int(cur.fetchone()[0])
+
+
 # ── T003·T004: 배치 처리 + cap·종료 격리 ─────────────────────────────────────
 
 
@@ -177,6 +202,7 @@ class BatchReport:
     · ``failed_retry``    — 처리 실패·cap 미달. 비종료 유지 → 다음 run 고착스캔이 리셋·재시도(불변식 #3).
     · ``failed_terminal`` — 처리 실패·cap 도달. ``failed`` 종료 격리(무한 재시도 차단).
     · ``reset``           — 고착(crash) 자산을 received 로 리셋(self-healing, 불변식 #2).
+    · ``reset_isolated``  — 고착 리셋 cap 도달 → ``failed`` 종료 격리(크래시 루프 차단, 불변식 #2·#3).
     """
 
     registered: list[uuid.UUID] = field(default_factory=list)
@@ -185,21 +211,55 @@ class BatchReport:
     failed_retry: list[uuid.UUID] = field(default_factory=list)
     failed_terminal: list[uuid.UUID] = field(default_factory=list)
     reset: list[uuid.UUID] = field(default_factory=list)
+    reset_isolated: list[uuid.UUID] = field(default_factory=list)
 
 
-def reset_stuck_assets(db: Any, *, older_than_s: int, limit: int) -> list[uuid.UUID]:
-    """고착(crash) 자산을 received 로 리셋(self-healing, 불변식 #2). 리셋된 asset_id 목록 반환.
+def reset_stuck_assets(
+    db: Any, *, older_than_s: int, limit: int, max_failures: int
+) -> tuple[list[uuid.UUID], list[uuid.UUID]]:
+    """고착(crash) 자산을 received 로 리셋(self-healing, 불변식 #2) — 단, 크래시 루프는 cap 으로 차단.
 
-    한 트랜잭션에서 고착 스캔 + 조건부 claim_asset 리셋을 수행한다. claim 0행(그사이 다른 처리가
-    상태를 바꿈)은 자연 무시된다. 리셋된 자산은 received 가 되어 같은/다음 run 의 received 스캔에 잡힌다.
+    ``(reset, isolated)`` 반환: received 로 되돌린 목록과, 리셋 cap 도달로 ``failed`` 종료 격리한 목록.
+    한 트랜잭션에서 고착 스캔 + (cap 판정) + 조건부 claim/격리를 수행한다.
+
+    **크래시 루프 cap(불변식 #3 확장).** 하드 크래시(OOM-kill/SIGKILL/네이티브 segfault)는
+    ``_handle_failure`` 가 못 돌아 실패 lineage·cap 이 안 걸리고, 리셋된 자산은 created_at 이 오래돼
+    다음 배치 선두에서 또 처리되다 또 크래시 — 무한 루프 + head-of-line 정체가 된다. 이를 막으려
+    리셋마다 ``ingest.reset.v1`` lineage 를 남기고, 누적 복구 시도(실패+리셋, ``recovery_attempt_count``)
+    가 ``max_failures`` 이상이면 received 리셋 대신 ``mark_failed`` 로 종료 격리한다. cap 카운트는 리셋
+    기록 **전에** 세므로(이전 시도만 반영) N회 시도 후 격리된다. mark_failed 충돌(이미 종료)은 흡수한다.
     """
     reset: list[uuid.UUID] = []
+    isolated: list[uuid.UUID] = []
     with db.transaction() as conn:
         for asset_id, status in scan_stuck_assets(conn, older_than_s=older_than_s, limit=limit):
-            if claim_asset(conn, asset_id, expected=status, next=AssetStatus.RECEIVED):
+            # 이전까지의 복구 시도(실패 lineage + 리셋 lineage) — 이번 리셋 기록 '전에' 센다.
+            attempts = recovery_attempt_count(conn, asset_id)
+            if attempts >= max_failures:
+                # 크래시 루프 cap 도달 → received 리셋 대신 종료 격리(무한 재처리·head-of-line 정체 차단).
+                try:
+                    mark_failed(conn, asset_id, RESET_CAP_REASON)
+                    record_lineage(
+                        conn, asset_id, activity=RESET_ACTIVITY, agent="dag_process",
+                        payload={"prior_status": _status_value(status), "attempts": attempts, "terminal": True},
+                    )
+                    isolated.append(asset_id)
+                    _LOG.warning(
+                        "고착 리셋 cap 도달 → failed 격리: asset_id=%s (누적 %d회·%s)",
+                        asset_id, attempts, status,
+                    )
+                except InvalidTransitionError:
+                    # 그사이 다른 경로가 종료시킴(ConcurrentTransitionError 도 이 계열) — 흡수.
+                    pass
+            elif claim_asset(conn, asset_id, expected=status, next=AssetStatus.RECEIVED):
+                # cap 미달 — received 리셋 + 리셋 lineage(다음 판정의 cap 카운트 소스).
+                record_lineage(
+                    conn, asset_id, activity=RESET_ACTIVITY, agent="dag_process",
+                    payload={"prior_status": _status_value(status), "attempts": attempts},
+                )
                 reset.append(asset_id)
-                _LOG.info("고착 리셋(received): asset_id=%s (%s→received)", asset_id, status)
-    return reset
+                _LOG.info("고착 리셋(received): asset_id=%s (%s→received·누적 %d회)", asset_id, status, attempts)
+    return reset, isolated
 
 
 def _handle_failure(
@@ -276,8 +336,13 @@ def process_received_batch(
         os_index = _make_opensearch_indexer(db=db, settings=settings)
 
     # 1) 고착 리셋(옵션) — 비종료 고착 자산을 received 로 되돌려 이번/다음 run 재처리.
+    #    단, 크래시 루프(하드 크래시 반복)는 recovery cap 으로 failed 격리한다(불변식 #2·#3).
     if older_than_s is not None:
-        report.reset.extend(reset_stuck_assets(db, older_than_s=older_than_s, limit=limit))
+        _reset, _isolated = reset_stuck_assets(
+            db, older_than_s=older_than_s, limit=limit, max_failures=max_failures
+        )
+        report.reset.extend(_reset)
+        report.reset_isolated.extend(_isolated)
 
     # 2) received 스캔(짧은 읽기 트랜잭션).
     with db.transaction() as conn:
@@ -308,8 +373,10 @@ def process_received_batch(
             _handle_failure(db, asset_id, exc, max_failures=max_failures, report=report)
 
     _LOG.info(
-        "batch done: registered=%d deferred=%d skipped=%d failed_retry=%d failed_terminal=%d reset=%d",
+        "batch done: registered=%d deferred=%d skipped=%d failed_retry=%d "
+        "failed_terminal=%d reset=%d reset_isolated=%d",
         len(report.registered), len(report.deferred), len(report.skipped),
         len(report.failed_retry), len(report.failed_terminal), len(report.reset),
+        len(report.reset_isolated),
     )
     return report

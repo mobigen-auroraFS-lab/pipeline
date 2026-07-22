@@ -471,6 +471,79 @@ class TestRetryCapTerminalIsolation(unittest.TestCase):
         self.assertEqual(rep.failed_terminal, [_A1])    # 충돌 흡수돼도 종료 격리로 집계
 
 
+class TestResetStuckCrashLoopCap(unittest.TestCase):
+    """크래시 루프 cap — 하드 크래시(OOM-kill/SIGKILL/네이티브 segfault)로 예외 핸들러가 못 도는
+    자산이 고착→received 리셋을 무한 반복하며 배치 선두를 점유(head-of-line 정체)하지 않도록,
+    리셋 누적(``ingest.reset.v1``) + 실패(``ingest.failed.v1``) 합계가 cap 이상이면 received 리셋
+    대신 ``failed`` 로 종료 격리한다(불변식 #2·#3 통합).
+    """
+
+    def _run(self, *, attempts, stuck_status="extracting", claim_ok=True):
+        db = mock.MagicMock()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(br, "scan_stuck_assets", return_value=[(_A1, stuck_status)])
+            )
+            stack.enter_context(mock.patch.object(br, "recovery_attempt_count", return_value=attempts))
+            ca = stack.enter_context(mock.patch.object(br, "claim_asset", return_value=claim_ok))
+            rl = stack.enter_context(mock.patch.object(br, "record_lineage"))
+            mf = stack.enter_context(mock.patch.object(br, "mark_failed"))
+            reset, isolated = br.reset_stuck_assets(
+                db, older_than_s=900, limit=50, max_failures=3
+            )
+        return reset, isolated, ca, mf, rl
+
+    def test_under_cap_resets_to_received_and_records_reset_lineage(self) -> None:
+        reset, isolated, ca, mf, rl = self._run(attempts=2)  # 2 < 3
+        self.assertEqual(reset, [_A1])
+        self.assertEqual(isolated, [])
+        mf.assert_not_called()                              # cap 미달 → 격리 안 함
+        self.assertEqual(ca.call_args.kwargs["next"], AssetStatus.RECEIVED)  # received 리셋
+        # 리셋도 lineage 를 남겨 다음 판정의 cap 카운트 소스가 된다
+        self.assertEqual(rl.call_args.kwargs["activity"], br.RESET_ACTIVITY)
+        self.assertEqual(br.RESET_ACTIVITY, "ingest.reset.v1")
+
+    def test_at_cap_isolates_to_failed_instead_of_reset(self) -> None:
+        reset, isolated, ca, mf, rl = self._run(attempts=3)  # 3 >= 3(cap)
+        self.assertEqual(reset, [])
+        self.assertEqual(isolated, [_A1])
+        mf.assert_called_once()                             # 종료 격리(무한 크래시 루프 차단)
+        ca.assert_not_called()                              # received 리셋 안 함
+        # 격리도 terminal 표식 reset lineage 를 남긴다(관측성)
+        self.assertEqual(rl.call_args.kwargs["activity"], br.RESET_ACTIVITY)
+        self.assertTrue(rl.call_args.kwargs["payload"].get("terminal"))
+
+    def test_isolation_absorbs_concurrent_terminal(self) -> None:
+        # 그사이 다른 처리가 종료시킴 → mark_failed 의 InvalidTransitionError 를 흡수(배치 무중단)
+        db = mock.MagicMock()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(br, "scan_stuck_assets", return_value=[(_A1, "extracting")])
+            )
+            stack.enter_context(mock.patch.object(br, "recovery_attempt_count", return_value=5))
+            stack.enter_context(mock.patch.object(br, "record_lineage"))
+            stack.enter_context(
+                mock.patch.object(br, "mark_failed", side_effect=InvalidTransitionError("이미 종료"))
+            )
+            reset, isolated = br.reset_stuck_assets(
+                db, older_than_s=900, limit=50, max_failures=3
+            )
+        self.assertEqual(reset, [])
+        self.assertEqual(isolated, [])                      # 충돌 흡수 — 격리 집계 안 함
+
+    def test_recovery_attempt_count_counts_failed_and_reset(self) -> None:
+        conn, cur = _conn(fetchone=(4,))
+        n = br.recovery_attempt_count(conn, _A1)
+        self.assertEqual(n, 4)
+        sql = _last_sql(cur)
+        self.assertIn("COUNT(*)", sql.upper())
+        self.assertIn("asset_lineage", sql)
+        params = _last_params(cur)
+        # 실패 + 리셋 두 활동을 함께 센다(합산 cap 소스)
+        self.assertIn("ingest.failed.v1", params)
+        self.assertIn("ingest.reset.v1", params)
+
+
 class TestTerminalExcludedFromScans(unittest.TestCase):
     def test_deferred_registered_failed_are_terminal(self) -> None:
         # deferred 는 재시도 아님 — registered/failed 와 함께 종료 계열(스캔 대상 제외).

@@ -90,6 +90,7 @@ def process_batch(**_context) -> dict[str, int]:
         "failed_retry": len(report.failed_retry),
         "failed_terminal": len(report.failed_terminal),
         "reset": len(report.reset),
+        "reset_isolated": len(report.reset_isolated),
     }
     _LOG.info("dag_process 완료: %s", summary)
     return summary
