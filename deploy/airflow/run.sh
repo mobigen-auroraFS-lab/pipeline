@@ -27,12 +27,15 @@ AIRFLOW_META_DB="${AIRFLOW_META_DB:-airflow_native}"        # 기존 실사용 '
 RUN_DIR="${RUN_DIR:-$HOME/.dataflatform/pipeline}"          # pid·log
 # ────────────────────────────────────────────────────────────────────────────
 
-# conda 활성화(비대화형 셸)
+# conda 활성화(비대화형 셸). ※ conda.sh 소싱은 set -u 앞에 둔다 — conda.sh 내부가 미정의 변수를
+#   참조해 -u 를 먼저 켜면 소싱 자체가 깨진다(순서 중요).
 if [[ -r "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
   # shellcheck disable=SC1091
-  source "$CONDA_BASE/etc/profile.d/conda.sh"; conda activate "$CONDA_ENV"
+  source "$CONDA_BASE/etc/profile.d/conda.sh"
+  # C6: activate 실패(환경 부재 등)를 조용히 넘기지 않는다 — 잘못된 시스템 python 으로 진행 방지.
+  conda activate "$CONDA_ENV" || { echo "오류: conda 환경 활성 실패($CONDA_ENV) — 환경 존재/이름 확인" >&2; exit 1; }
 else
-  echo "경고: conda.sh 없음($CONDA_BASE) — CONDA_BASE 확인" >&2
+  echo "경고: conda.sh 없음($CONDA_BASE) — CONDA_BASE 확인(사전 활성화된 env 로 진행)" >&2
 fi
 set -uo pipefail
 
@@ -55,8 +58,17 @@ if [[ -z "${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN:-}" ]]; then
       # shellcheck disable=SC1091
       source "$CORE_DIR/.env.dev" >/dev/null 2>&1 || true
     fi
-    printf 'postgresql+psycopg2://%s:%s@%s:%s/%s' \
-      "${POSTGRES_USER:-}" "${POSTGRES_PASSWORD:-}" "${POSTGRES_HOST:-localhost}" "${POSTGRES_PORT:-5432}" "$AIRFLOW_META_DB"
+    # C5: user·password 를 URL-인코딩(퍼센트)한다 — 특수문자(@ : / # 등) 비밀번호가 접속 URL 을 깨뜨리지
+    #   않게(예 p@ss → p%40ss). host/port/db 는 자격증명이 아니라 그대로. conda python 으로 조립(shell 값 명시 전달).
+    POSTGRES_USER="${POSTGRES_USER:-}" POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-}" \
+    POSTGRES_HOST="${POSTGRES_HOST:-localhost}" POSTGRES_PORT="${POSTGRES_PORT:-5432}" \
+    AIRFLOW_META_DB="$AIRFLOW_META_DB" python - <<'PY'
+import os, urllib.parse as up
+enc = lambda s: up.quote(s, safe="")
+print("postgresql+psycopg2://%s:%s@%s:%s/%s" % (
+    enc(os.environ["POSTGRES_USER"]), enc(os.environ["POSTGRES_PASSWORD"]),
+    os.environ["POSTGRES_HOST"], os.environ["POSTGRES_PORT"], os.environ["AIRFLOW_META_DB"]))
+PY
   )"
 fi
 export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
@@ -66,7 +78,30 @@ mkdir -p "$RUN_DIR" "$WATCHER_INBOX_DIR" "$WATCHER_ARCHIVE_DIR"
 SVCS=(scheduler dag-processor api-server)
 
 # ── 유틸 ─────────────────────────────────────────────────────────────────────
-is_running() { local p; [[ -f "$RUN_DIR/$1.pid" ]] && p="$(cat "$RUN_DIR/$1.pid")" 2>/dev/null && kill -0 "$p" 2>/dev/null; }
+# C3: 동시 start/stop 직렬화용 원자 락 — mkdir 은 'create-or-fail' 이라 flock(macOS 부재) 대체로 안전.
+_LOCK_DIR="$RUN_DIR/.lock"
+acquire_lock() {
+  if ! mkdir "$_LOCK_DIR" 2>/dev/null; then
+    echo "다른 run.sh 가 실행 중입니다(락: $_LOCK_DIR). 끝나길 기다리거나, 비정상 종료로 남았으면 그 폴더를 지우세요." >&2
+    exit 1
+  fi
+  trap 'rmdir "$_LOCK_DIR" 2>/dev/null || true' EXIT   # 스크립트 종료 시 자동 해제
+}
+
+# C2: pid 가 살아있고 '진짜 우리 airflow' 인지 확인 — 서비스가 죽은 뒤 OS 가 그 pid 를 무관 프로세스에
+#   재할당했을 때 '실행 중' 오인이나 stop 의 남의 프로세스 kill 을 막는다.
+_is_our_airflow() {
+  local p="$1"
+  kill -0 "$p" 2>/dev/null || return 1
+  ps -p "$p" -o command= 2>/dev/null | grep -q "airflow" || return 1
+}
+
+is_running() {
+  local p
+  [[ -f "$RUN_DIR/$1.pid" ]] || return 1
+  p="$(cat "$RUN_DIR/$1.pid" 2>/dev/null)" || return 1
+  _is_our_airflow "$p"
+}
 
 start_one() {
   local name="$1"; local -a cmd
@@ -77,8 +112,15 @@ start_one() {
     *) echo "  알 수 없는 서비스: $name"; return 1 ;;
   esac
   if is_running "$name"; then printf '  = %-13s 이미 실행 중(pid %s)\n' "$name" "$(cat "$RUN_DIR/$name.pid")"; return 0; fi
-  ( cd "$REPO_ROOT" && exec "${cmd[@]}" ) >"$RUN_DIR/$name.log" 2>&1 &
-  local pid=$!; echo "$pid" >"$RUN_DIR/$name.pid"
+  # C1: nohup(SIGHUP 무시) + </dev/null(터미널 stdin 분리) + set -m(자기 프로세스그룹 리더로) 로 띄운다 —
+  #   터미널·SSH 종료(SIGHUP)에도 살아남고, 기록한 pid 가 곧 프로세스그룹 리더라 stop 이 그룹째 종료(C4)할 수 있다.
+  #   set -m 은 job control 이므로 tty 가 필요(대화형 `./run.sh start`). tty 없는 비대화형(cron 등)에선 조용히
+  #   생략되고 일반 백그라운드로 뜬다 — 그 경우 stop 이 단일 pid 로 폴백해 여전히 종료된다(자식 회수만 못함).
+  set -m 2>/dev/null || true
+  ( cd "$REPO_ROOT" && exec nohup "${cmd[@]}" ) >"$RUN_DIR/$name.log" 2>&1 </dev/null &
+  local pid=$!
+  set +m 2>/dev/null || true
+  echo "$pid" >"$RUN_DIR/$name.pid"
   printf '  ▶ %-13s pid %-7s → %s\n' "$name" "$pid" "$RUN_DIR/$name.log"
 }
 stop_one() {
@@ -86,11 +128,16 @@ stop_one() {
   local pidf="$RUN_DIR/$name.pid" pid
   if [[ ! -f "$pidf" ]]; then printf '  - %-13s pid 없음(미기동?)\n' "$name"; return; fi
   pid="$(cat "$pidf")"
-  if ! kill -0 "$pid" 2>/dev/null; then printf '  - %-13s 이미 종료\n' "$name"; rm -f "$pidf"; return; fi
+  # C2: 살아있는 '우리 airflow' 가 아니면(종료됨 또는 재할당된 무관 pid) 파일만 정리하고 끝 — 남의 프로세스 kill 방지.
+  if ! _is_our_airflow "$pid"; then printf '  - %-13s 이미 종료(또는 무관 pid)\n' "$name"; rm -f "$pidf"; return; fi
   printf '  ▪ %-13s 종료(pid %s)…' "$name" "$pid"
-  kill -TERM "$pid" 2>/dev/null || true
+  # C4: 단일 pid 가 아니라 프로세스그룹(-pid)째 종료 — LocalExecutor 태스크·gunicorn 워커 등 자식까지 회수(고아 방지).
+  #   그룹 종료가 안 되는 구버전 pid(비-리더)면 단일 pid 로 폴백.
+  kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
   for _ in $(seq 1 10); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-  if kill -0 "$pid" 2>/dev/null; then printf ' 강제(SIGKILL)'; kill -KILL "$pid" 2>/dev/null || true; fi
+  if kill -0 "$pid" 2>/dev/null; then
+    printf ' 강제(SIGKILL)'; kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+  fi
   printf ' 완료\n'; rm -f "$pidf"
 }
 
@@ -130,9 +177,9 @@ do_status() {
 }
 
 case "${1:-}" in
-  start)   do_start ;;
-  stop)    do_stop ;;
-  restart) do_stop; sleep 1; do_start ;;
-  status)  do_status ;;
+  start)   acquire_lock; do_start ;;
+  stop)    acquire_lock; do_stop ;;
+  restart) acquire_lock; do_stop; sleep 1; do_start ;;
+  status)  do_status ;;                 # 읽기 전용 — 락 불요
   *) echo "사용법: $(basename "$0") <start|stop|restart|status>"; exit 2 ;;
 esac
