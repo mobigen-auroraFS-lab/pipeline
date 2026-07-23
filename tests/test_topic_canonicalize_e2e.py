@@ -270,7 +270,8 @@ class TestTopicCanonicalizeWiringE2E(unittest.TestCase):
         """
         from src.config import settings as settings_mod
         base = settings_mod.get_current_settings()
-        patched = dataclasses.replace(base, topic_canonicalize_enabled=enabled)
+        # 069 US-E: 설정이 도메인 중첩됨 — topic_canonicalize_enabled 는 settings.topic.canonicalize_enabled.
+        patched = dataclasses.replace(base, topic=dataclasses.replace(base.topic, canonicalize_enabled=enabled))
         with mock.patch.object(settings_mod, "_SETTINGS", patched):
             yield
 
