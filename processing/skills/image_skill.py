@@ -1,6 +1,6 @@
 """F-3.2 이미지 추출 함수(디스패처가 호출).
 
-``run_extract_meta.py`` 의 이미지 분기를 이식. 출력만 ``AssetRecord``.
+구 monolith ``run_extract_meta.py`` 의 이미지 분기를 이식. 출력만 ``AssetRecord``.
 무거운 import(torch/CLIP/VLM)는 함수 내부에 둔다 — 텍스트 전용 실행 시 미로딩.
 """
 

@@ -1,6 +1,6 @@
 """F-3.2 영상 추출 함수(디스패처가 호출).
 
-``run_extract_meta.py`` 의 영상 분기를 이식(키프레임 → VLM 요약 → 키프레임별 ST/CLIP 임베딩 쌍).
+구 monolith ``run_extract_meta.py`` 의 영상 분기를 이식(키프레임 → VLM 요약 → 키프레임별 ST/CLIP 임베딩 쌍).
 출력만 ``AssetRecord``. 무거운 import(scenedetect/CLIP/VLM)는 함수 내부에 둔다.
 """
 

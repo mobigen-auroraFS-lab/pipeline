@@ -1,4 +1,4 @@
-"""이미지 파일 속성 메타(크기·색모드·포맷·대표색) 추출 — ``src/skills/image_skill.py`` 가 호출.
+"""이미지 파일 속성 메타(크기·색모드·포맷·대표색) 추출 — ``processing/skills/image_skill.py`` 가 호출.
 
 Pillow 만 쓰는 경량 추출이다. 의미 정보(캡션·키워드·라벨)와 CLIP 벡터는 skill 쪽에서
 VLM·CLIP 으로 별도 생성한다 — 이 모듈은 그와 무관한 결정적 파일 속성만 담당한다.

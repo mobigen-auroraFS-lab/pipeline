@@ -1,4 +1,4 @@
-"""오디오 파일 속성 메타(길이·샘플레이트·채널) 추출 — ``src/skills/audio_skill.py`` 가 호출.
+"""오디오 파일 속성 메타(길이·샘플레이트·채널) 추출 — ``processing/skills/audio_skill.py`` 가 호출.
 
 내용(전사)이 아닌 컨테이너 속성만 본다. STT 전사·요약은 skill 쪽에서 별도로 처리한다.
 
