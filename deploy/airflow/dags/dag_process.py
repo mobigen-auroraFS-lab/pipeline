@@ -48,16 +48,25 @@ _SCHEDULE = os.environ.get("DAG_PROCESS_SCHEDULE", "0 * * * *")
 _POOL = os.environ.get("DAG_PROCESS_POOL", "gpu")
 
 
-def _int_env(name: str, default: int) -> int:
-    """정수 env(미설정/형식오류=기본값) — 배치 한도·cap·고착 임계 주입용."""
+def _int_env(name: str, default: int, *, minimum: int = 1) -> int:
+    """정수 env(미설정/형식오류/범위위반=기본값) — 배치 한도·cap·고착 임계 주입용.
+
+    A1: ``minimum`` 미만(기본값 하 음수·0)이면 기본값으로 되돌린다. 방치하면 오설정이 조용히 진행돼
+    ``DAG_PROCESS_LIMIT`` 음수는 PG 'LIMIT must not be negative' 로 배치 태스크가 크래시, 0 은 매 run
+    0건 처리(무음 스톨), ``DAG_PROCESS_MAX_FAILURES`` 0 은 첫 실패 즉시 격리를 유발한다. 세 소비처
+    (limit·max_failures·older_than_s) 모두 ≥1 이 유효값이라 기본 ``minimum=1``."""
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
         return default
     try:
-        return int(raw)
+        val = int(raw)
     except ValueError:
         _LOG.warning("env %s 정수 변환 실패(기본값 %d 사용): %r", name, default, raw)
         return default
+    if val < minimum:
+        _LOG.warning("env %s=%d 가 최소 %d 미만 → 기본값 %d 사용", name, val, minimum, default)
+        return default
+    return val
 
 
 def process_batch(**_context) -> dict[str, int]:
