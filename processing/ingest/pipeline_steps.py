@@ -278,17 +278,16 @@ def process_asset(
     # aboutness 개체 확정(073 FR-001) — 검색 OR-증거 필터의 적재시점 층. 065 분류와 동일 격리
     # 패턴(실패=warn·registered 유지·백필 재시도 대상). os_index **전**에 저장해 첫 OS doc 부터
     # about 을 포함한다(asset_to_doc 이 ext_meta['about'] 을 읽음).
-    # 의료 제외(리뷰 지적 — 백필 CLI 의 medical 제외와 대칭): 의료는 현재 시그니처 기반 deferred 라
-    # 여기 도달하지 않지만, 미인식 의료 자산이 registered 로 진행돼도 summary 를 LLM 에 보내지
-    # 않도록 이중 방어한다(검색 자체가 의료 배제(FR-011)라 about 도 불요).
-    if domain != "medical":
-        try:
-            with db.transaction() as conn:
-                extract_and_persist_about(
-                    conn, asset_id, summary=record.ext_meta.get("summary"), client=None
-                )
-        except Exception as exc:  # noqa: BLE001 — 추출 실패가 적재(registered)를 막지 않는다(073 격리)
-            _LOG.warning("aboutness 추출 실패(무시): asset_id=%s (%s)", asset_id, exc)
+    # 2026-07-23: 도메인 제외 전면 제거로 의료도 검색 노출 → 기존 'domain != medical' skip 가드 삭제
+    # (전 도메인 균일). aboutness 는 complete_json(온프레미스 gemma) 단일 seam 경유라 의료 PHI 외부
+    # 반출 아님(헌법 정합·외부 LLM 금지는 seam 정책 엔진이 담보). 실패=warn·registered 유지(073 격리).
+    try:
+        with db.transaction() as conn:
+            extract_and_persist_about(
+                conn, asset_id, summary=record.ext_meta.get("summary"), client=None
+            )
+    except Exception as exc:  # noqa: BLE001 — 추출 실패가 적재(registered)를 막지 않는다(073 격리)
+        _LOG.warning("aboutness 추출 실패(무시): asset_id=%s (%s)", asset_id, exc)
 
     # 증분 색인(opt-in·격리) — 위 finalize 트랜잭션이 **PG 커밋된 직후** 호출한다(FR-002).
     # off(기본)면 즉시 반환해 OpenSearch 코드를 전혀 건드리지 않으므로 기존 동작 불변(SC-001).
