@@ -128,7 +128,7 @@ class TestAssetTopicQueryDB(unittest.TestCase):
             lambda conn: fetch_asset_topic(conn, str(uuid.uuid4())), idempotent=True)
         self.assertEqual(empty, [])
 
-    def test_find_same_topic_groups_pairs_and_medical_excluded(self):
+    def test_find_same_topic_groups_pairs_and_medical_included(self):
         from src.topic.asset_topic_query import find_same_topic_groups
         a, b, c, m = self._seed()
 
@@ -138,21 +138,21 @@ class TestAssetTopicQueryDB(unittest.TestCase):
         groups = [g for g in out if g["topic_ko"] == self._topic]
         self.assertEqual(len(groups), 1)
         g = groups[0]
-        self.assertEqual(g["asset_count"], 2)   # {B,C} distinct — 대상 A·M(의료) 제외
+        self.assertEqual(g["asset_count"], 3)   # {B,C,M} distinct — 대상 A(소스)만 제외(2026-07-23 도메인 제외 없음)
         self.assertEqual([s["subtopic_ko"] for s in g["subtopics"]], [self._subtopic])
         sub = g["subtopics"][0]
-        self.assertEqual(sub["asset_count"], 2)
+        self.assertEqual(sub["asset_count"], 3)
         by_id = {x["asset_id"]: x for x in sub["assets"]}
-        self.assertEqual(set(by_id), {b, c})
+        self.assertEqual(set(by_id), {b, c, m})
         self.assertTrue(by_id[b]["already_linked"])   # A—B active
         self.assertFalse(by_id[c]["already_linked"])  # A—C 없음
         self.assertTrue(all(isinstance(x["asset_id"], str) for x in sub["assets"]))
-        # PHI: 의료 M·대상 A 는 어디에도 없다.
+        # 2026-07-23: 도메인 제외 없음 — 의료 M 도 포함. 대상 A(소스)만 제외.
         all_ids = {x["asset_id"] for gr in out for s in gr["subtopics"] for x in s["assets"]}
-        self.assertNotIn(m, all_ids)
+        self.assertIn(m, all_ids)
         self.assertNotIn(a, all_ids)
 
-    def test_assets_in_topic_paging_and_medical_excluded(self):
+    def test_assets_in_topic_paging_and_medical_included(self):
         from src.topic.asset_topic_query import assets_in_topic
         a, b, c, m = self._seed()
 
@@ -160,9 +160,9 @@ class TestAssetTopicQueryDB(unittest.TestCase):
             lambda conn: assets_in_topic(conn, topic_ko=self._topic, limit=50, offset=0),
             idempotent=True)
         ids = [r["asset_id"] for r in full["rows"]]
-        self.assertEqual(full["total"], 3)          # {A,B,C} — M 제외
-        self.assertEqual(set(ids), {a, b, c})
-        self.assertNotIn(m, ids)
+        self.assertEqual(full["total"], 4)          # {A,B,C,M}(2026-07-23 도메인 제외 없음)
+        self.assertEqual(set(ids), {a, b, c, m})
+        self.assertIn(m, ids)
         self.assertEqual(ids, sorted(ids))          # asset_id asc 결정적
 
         p1 = self.db.execute_in_transaction(
@@ -172,19 +172,19 @@ class TestAssetTopicQueryDB(unittest.TestCase):
             lambda conn: assets_in_topic(conn, topic_ko=self._topic, limit=2, offset=2),
             idempotent=True)
         self.assertEqual(len(p1["rows"]), 2)
-        self.assertEqual(len(p2["rows"]), 1)
-        self.assertEqual(p1["total"], 3)
+        self.assertEqual(len(p2["rows"]), 2)
+        self.assertEqual(p1["total"], 4)
 
         hit = self.db.execute_in_transaction(
             lambda conn: assets_in_topic(conn, topic_ko=self._topic, subtopic_ko=self._subtopic),
             idempotent=True)
-        self.assertEqual(hit["total"], 3)
+        self.assertEqual(hit["total"], 4)
         miss = self.db.execute_in_transaction(
             lambda conn: assets_in_topic(conn, topic_ko=self._topic, subtopic_ko="__없는것__"),
             idempotent=True)
         self.assertEqual(miss["total"], 0)
 
-    def test_list_topics_asset_count_and_medical_excluded(self):
+    def test_list_topics_asset_count_and_medical_included(self):
         from src.topic.asset_topic_query import list_topics
         a, b, c, m = self._seed()
 
@@ -195,10 +195,10 @@ class TestAssetTopicQueryDB(unittest.TestCase):
             if o["topic_ko"] == self._topic and o["subtopic_ko"] == self._subtopic
         ]
         self.assertEqual(len(entries), 1)               # 유니크 topic — 단일 엔트리
-        self.assertEqual(entries[0]["asset_count"], 3)  # {A,B,C} distinct — M 제외
-        self.assertEqual(entries[0]["topic_asset_count"], 3)
+        self.assertEqual(entries[0]["asset_count"], 4)  # {A,B,C,M} distinct(2026-07-23 도메인 제외 없음)
+        self.assertEqual(entries[0]["topic_asset_count"], 4)
         self.assertEqual(entries[0]["subtopic_ko"], self._subtopic)
-        # 의료 자산 M 은 어떤 엔트리에도 자기 topic 을 노출하지 않는다(SQL 의료 제외).
+        # 2026-07-23: 도메인 제외 없음 — 의료 M 도 자기 topic 을 노출한다.
         self.assertTrue(all("topic_ko" in o for o in out))
 
 
