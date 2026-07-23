@@ -41,7 +41,7 @@ except Exception:  # noqa: BLE001 — airflow 미설치/임포트 실패 시 전
     _AIRFLOW_AVAILABLE = False
 
 # 프로젝트 루트 기준 DAG 폴더(테스트가 어디서 실행돼도 절대경로). dags 는 repo 정본 —
-#   운영 스택(/work/docker)은 이 dags 를 복사/마운트해 쓴다(소스는 repo 가 기준).
+#   네이티브 Airflow(run.sh)가 AIRFLOW__CORE__DAGS_FOLDER 로 이 dags 를 직접 가리킨다(도커 제거·소스=repo).
 _DAG_FOLDER = str(Path(__file__).resolve().parents[1] / "deploy" / "airflow" / "dags")
 
 _EXPECTED_DAGS = {"dag_collect", "dag_process", "dag_relations"}
@@ -359,6 +359,47 @@ class TestThinWrappers(unittest.TestCase):
         self.assertTrue(gate(**_fake_context({"registered": 3, "deferred": 1})))   # 신규 3건 → 통과
         self.assertFalse(gate(**_fake_context({"registered": 0, "deferred": 2})))  # 0건 → 스킵
         self.assertFalse(gate(**_fake_context(None)))                              # XCom 없음 → 스킵
+
+
+@unittest.skipUnless(_AIRFLOW_AVAILABLE, "apache-airflow 미설치 — dag_process 모듈 로드 불가")
+class TestIntEnvValidation(unittest.TestCase):
+    """A1 — ``_int_env`` 는 음수·0(minimum 미만)을 기본값으로 되돌린다.
+
+    방치 시 DAG_PROCESS_LIMIT 음수는 PG 'LIMIT must not be negative' 배치 크래시, 0 은 매 run 0건
+    (무음 스톨), MAX_FAILURES 0 은 첫 실패 즉시 격리를 유발한다. dag_process 모듈에서 함수를 꺼내 검증.
+    """
+
+    @staticmethod
+    def _fn():
+        import inspect
+
+        mod = inspect.getmodule(_callable("dag_process", _PROCESS_TASK))
+        return mod._int_env
+
+    def test_valid_positive_returned(self) -> None:
+        with mock.patch.dict(os.environ, {"X_LIM": "50"}):
+            self.assertEqual(self._fn()("X_LIM", 10), 50)
+
+    def test_negative_falls_back_to_default(self) -> None:
+        with mock.patch.dict(os.environ, {"X_LIM": "-1"}):
+            self.assertEqual(self._fn()("X_LIM", 10), 10)
+
+    def test_zero_falls_back_to_default(self) -> None:
+        with mock.patch.dict(os.environ, {"X_LIM": "0"}):
+            self.assertEqual(self._fn()("X_LIM", 10), 10)
+
+    def test_nonint_falls_back_to_default(self) -> None:
+        with mock.patch.dict(os.environ, {"X_LIM": "abc"}):
+            self.assertEqual(self._fn()("X_LIM", 10), 10)
+
+    def test_unset_uses_default(self) -> None:
+        os.environ.pop("X_LIM", None)
+        self.assertEqual(self._fn()("X_LIM", 10), 10)
+
+    def test_custom_minimum_allows_zero(self) -> None:
+        # 하한을 낮추면 0 허용 — 방어는 기본 minimum=1 일 때만(세 소비처가 그렇게 호출).
+        with mock.patch.dict(os.environ, {"X_LIM": "0"}):
+            self.assertEqual(self._fn()("X_LIM", 10, minimum=0), 0)
 
 
 if __name__ == "__main__":
