@@ -39,6 +39,21 @@ else
 fi
 set -uo pipefail
 
+# ── 앱 레벨 env 주입(META_MODEL·POSTGRES_*·EMBED_*·OPENSEARCH_* 등) ──────────────
+# DAG 태스크는 init_settings/PostgresUtil 이 os.environ 에서 읽으므로 앱 설정을 Airflow 프로세스
+# 환경에 실어야 한다 — 아래 SQL 조립 $(...) 서브셸의 source 는 그 안에만 갇혀 프로세스로 새지 않아
+# META_MODEL 등이 빠지면 collect/process 태스크가 init_settings 에서 즉사한다. 코어 .env.dev 를
+# set -a 로 export(없으면 운영자 사전 export 로 보고 경고만). 이 아래 명시 export(META_ENV=dev·
+# WATCHER_* 등)가 뒤에 와서 프로파일·경로는 run.sh 가 authoritative.
+if [[ -f "$CORE_DIR/.env.dev" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$CORE_DIR/.env.dev" >/dev/null 2>&1 || true
+  set +a
+else
+  echo "경고: $CORE_DIR/.env.dev 없음 — DAG 의 init_settings 가 META_MODEL 부재로 실패할 수 있음" >&2
+fi
+
 # Airflow(네이티브) 환경변수
 export AIRFLOW_HOME
 export AIRFLOW__CORE__EXECUTOR=LocalExecutor
