@@ -100,6 +100,8 @@ def sample_score(conn: Connection[Any], pairs: list[Candidate]) -> list[ScoredPa
         return []
     source_id = pairs[0].source_id
     target_ids = [c.target_id for c in pairs]
+    # source×target 청크 임베딩을 **채널별로 자기조인**한다 — 자산당 청크가 여럿이면 카티전 곱(팬아웃)이
+    # 되므로 GROUP BY target + MAX 로 (동일 채널) 청크쌍의 최대 코사인만 남긴다(자산쌍 1개 점수로 축약).
     sql = """
         SELECT ta.asset_id::text AS id,
                MAX(1 - (sa.embedding <=> ta.embedding)) AS sim

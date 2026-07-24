@@ -28,7 +28,7 @@ from src.relations.llm_propose import propose_edges_json
 def _classify_cascade_v1(ctx: ExtractContext):
     """ClassifyStage 어댑터 — cascade.classify(file_path, modality) 를 ctx 기반으로 감쌈.
 
-    **교차 참조**: cascade.classify 는 도메인-불가지 cascade 엔진(src/classify/domains/ 하위
+    **교차 참조**: cascade.classify 는 도메인-불가지 cascade 엔진(processing/classify/domains/ 하위
     DomainProfile 레지스트리 기반)으로, 새 도메인 추가 시 이 어댑터 코드는 수정하지 않아도 된다.
     """
     return cascade.classify(ctx.file_path, ctx.modality)

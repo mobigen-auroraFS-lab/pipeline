@@ -22,7 +22,7 @@ class ClassifyStage(Protocol):
 
 
 class ExtractStage(Protocol):
-    def __call__(self, ctx: ExtractContext) -> AssetRecord: ...  # 메타/태그/fts (embeddings 비움)
+    def __call__(self, ctx: ExtractContext) -> AssetRecord: ...  # 메타/태그 (embeddings 비움·037 OS 전용 전환으로 FTS 경로 제거)
 
 
 class EmbedStage(Protocol):

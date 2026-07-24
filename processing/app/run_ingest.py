@@ -9,7 +9,7 @@
     6. 어디서든 예외 → **fresh 트랜잭션**으로 mark_failed (이전 트랜잭션이 abort 돼도 안전). 다음 파일 계속.
 
 069 US-E FR-E3: 재사용 스텝(``collect_file``·``process_asset``·``_make_opensearch_indexer``·
-``CollectResult``·타입)은 **ingest 계층 ``src/ingest/pipeline_steps.py`` 로 이관**됐다(배치·DAG 가
+``CollectResult``·타입)은 **ingest 계층 ``processing/ingest/pipeline_steps.py`` 로 이관**됐다(배치·DAG 가
 app 진입점을 거꾸로 import 하던 레이어링 해소·레포 분리 대비). 이 모듈은 그것들을 재import 해 CLI
 end-to-end(``run_ingest``)로 엮고, 하위호환으로 재export 한다(테스트의 ``run_ingest.collect_file`` patch·
 dag 참조 유지). ``run_ingest``/``main``/``_configure_logging`` 만 여기 CLI 조립으로 남는다.

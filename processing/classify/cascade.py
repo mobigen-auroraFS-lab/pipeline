@@ -58,6 +58,7 @@ def classify(
     modality: str,
     *,
     provider: DomainProfileProvider | None = None,
+    # Stage3 LLM 판별 주입 seam(기본=온프레미스 gemma). 테스트·대체 구현이 이 인자로 주입한다.
     _llm_classify: Callable = stage3_gemma.classify,
 ) -> ClassificationResult:
     """프로파일 기반 도메인-불가지 3-stage cascade."""
@@ -67,7 +68,7 @@ def classify(
     # Stage 1 — 시그니처: 정확히 한 도메인만 매칭하면 확정, 0/충돌은 Stage 2 로.
     # s1_scores 구조: {domain: {"signature": <종류>, **detail}}
     # detail 에 "signature" 키가 없어야 충돌 없음 — SigHit.detail 은 관례상 그러하나 주의.
-    # run_ingest 가 이 구조를 직접 참조해 deferred 자산을 판별한다.
+    # 소비처(ingest 스텝·069 FR-E3 이관)가 이 구조를 참조해 deferred 자산을 판별한다.
     head = _read_head(file_path)
     s1_scores: dict[str, dict] = {}
     for p in profiles:

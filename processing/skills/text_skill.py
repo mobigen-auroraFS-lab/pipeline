@@ -1,6 +1,6 @@
 """F-3.1 텍스트/문서 추출 함수(디스패처가 호출).
 
-기존 추출/요약/임베딩/FTS 함수를 재사용해 ``AssetRecord`` 로 매핑한다
+기존 추출/요약/임베딩 함수를 재사용해 ``AssetRecord`` 로 매핑한다
 (구 monolith ``run_extract_meta.py`` 의 텍스트 분기와 동일 로직, 출력만 AssetRecord).
 """
 
