@@ -8,10 +8,10 @@
     5. finalize_asset 로 메타·임베딩 적재 + ``registered`` (한 트랜잭션).
     6. 어디서든 예외 → **fresh 트랜잭션**으로 mark_failed (이전 트랜잭션이 abort 돼도 안전). 다음 파일 계속.
 
-069 US-E FR-E3: 재사용 스텝(``collect_file``·``process_asset``·``_make_opensearch_indexer``·
+재사용 스텝(``collect_file``·``process_asset``·``_make_opensearch_indexer``·
 ``CollectResult``·타입)은 **ingest 계층 ``processing/ingest/pipeline_steps.py`` 로 이관**됐다(배치·DAG 가
 app 진입점을 거꾸로 import 하던 레이어링 해소·레포 분리 대비). 이 모듈은 그것들을 재import 해 CLI
-end-to-end(``run_ingest``)로 엮고, 하위호환으로 재export 한다(테스트의 ``run_ingest.collect_file`` patch·
+end-to-end(``run_ingest``)로 엮고, 같은 이름으로 다시 내보낸다(테스트의 ``run_ingest.collect_file`` patch·
 dag 참조 유지). ``run_ingest``/``main``/``_configure_logging`` 만 여기 CLI 조립으로 남는다.
 
 ``classify_fn``/``extract_fn`` 은 **테스트·e2e 전용 override** 주입점이다(운영 호출부 없음).
@@ -27,15 +27,15 @@ from src.config.settings import get_current_settings
 from src.database.lineage_persist import record_lineage
 from src.database.postgres_util import PostgresUtil
 
-# FR-E3: 파이프라인 스텝은 pipeline_steps(ingest 계층)로 이관됨 — 여기서 재import 해 CLI 오케스트레이션에
-# 쓰고, 하위호환으로 재export 한다(run_ingest.<name> import·patch 경로 보존·정본은 pipeline_steps).
+# ⚠️ 스텝의 정본은 ``pipeline_steps`` 다(계층이 뒤집히지 않게 아래로 내렸다). 여기서 다시
+# import 해 CLI 조립에 쓰고 **같은 이름으로 내보낸다** — 이 이름을 바꿔 끼우는 테스트가 있다.
 from processing.ingest.pipeline_steps import (
-    REASON_DUPLICATE,  # noqa: F401 — 하위호환 재export
-    REASON_MISSING,  # noqa: F401 — 하위호환 재export(router 정의를 pipeline_steps 경유로 재노출)
+    REASON_DUPLICATE,  # noqa: F401 — 이 이름으로 쓰는 호출부·테스트가 있어 재노출
+    REASON_MISSING,  # noqa: F401 — 위와 같은 이유로 재노출(정의는 라우터 쪽)
     ClassifyFn,
-    CollectResult,  # noqa: F401 — 하위호환 재export
+    CollectResult,  # noqa: F401 — 위와 같은 이유로 재노출
     ExtractFn,
-    OsIndexFn,  # noqa: F401 — 하위호환 재export
+    OsIndexFn,  # noqa: F401 — 위와 같은 이유로 재노출
     _make_opensearch_indexer,
     collect_file,
     process_asset,
@@ -72,11 +72,22 @@ def run_ingest(
     registry=DEFAULT_REGISTRY,
     settings: Any = None,
 ) -> dict[str, list[Any]]:
-    """파일 리스트를 적재. 반환: {'registered': [asset_id], 'failed': [(asset_id,err)], 'skipped': [(path,reason)]}.
+    """파일 목록을 처음부터 끝까지 적재한다 — 수집과 처리를 이어 부른다.
 
-    파일마다 ``collect_file``(→received) → ``process_asset``(→registered/deferred)을 이어 호출하는
-    standalone end-to-end 오케스트레이터다(헌법 8조 — 분할 전 동작과 자산/상태/lineage/dedup/os_index
-    바이트 동일). 파일 단위 격리: 한 파일의 어떤 실패도 배치를 멈추지 않고 즉시 ``failed`` 로 마킹한다.
+    **DB에 쓴다.** **한 파일의 실패가 배치를 멈추지 않는다** — 파일마다 따로 감싸고, 실패는
+    즉시 실패로 표시한 뒤 다음 파일로 넘어간다.
+
+    Args:
+        files: 적재할 경로 목록.
+        db: 트랜잭션을 열 수 있는 DB 핸들.
+        extract_fn: 추출을 갈아끼울 때만. 미주입이면 팩이 고른 전략을 쓴다.
+        classify_fn: 분류를 갈아끼울 때만. 미주입이면 팩이 고른 전략을 쓴다.
+        registry: 전략을 찾을 레지스트리.
+        settings: 설정. 미주입이면 현재 활성 설정을 쓴다.
+
+    Returns:
+        ``registered``·``deferred``·``failed``·``skipped`` 네 갈래 목록. 건너뜀은 실패가
+        아니다 — 파일이 없거나 이미 같은 내용이 적재된 경우다.
     """
     _configure_logging()
     cfg = settings or get_current_settings()
@@ -122,7 +133,7 @@ def run_ingest(
                         record_lineage(conn, asset_id, activity="ingest.failed.v1", agent="run_ingest",
                                        payload={"reason": reason})
                     except InvalidTransitionError:
-                        # 이미 종료 상태면 무시. 009: ConcurrentTransitionError(동시 전이 충돌 —
+                        # 이미 종료 상태면 무시. 동시 전이 충돌(조건부 UPDATE 0행 —
                         # 다른 워커가 먼저 종료시킨 경우)도 이 계열의 하위라 같은 경로로 흡수돼
                         # 배치가 멈추지 않는다(호출부 시그니처 무변경).
                         pass
@@ -144,7 +155,7 @@ def run_ingest(
 #     register_defaults 를 실행 → classify/cascade_v1·extract·embed/by_modality·persist + cross-asset 슬롯.
 #   · 도메인 프로파일 DOMAIN_PROFILES ← builtins→cascade→`processing.classify.domains`→medical 체인 →
 #     {"medical"}(DICOM/HL7/FHIR 시그니처+어휘). general 은 미등록 — cascade 엔진 내장 폴백.
-# [런타임·main() 안·순서 중요] 부트스트랩은 src.config.bootstrap.bootstrap_env(env) 로 일원화(FR-E2):
+# [런타임·main() 안·순서 중요] 부트스트랩은 ``bootstrap_env(env)`` 한 곳으로 모았다:
 #   .env.{env} 로드(override=False) → init_settings(env) 검증. 이후 PostgresUtil() + `with db:` (PG17 검증).
 def main() -> int:
     """CLI: 로컬 파일 수집 후 asset_* 적재. 예) python -m processing.app.run_ingest --env dev --input-dir DIR"""

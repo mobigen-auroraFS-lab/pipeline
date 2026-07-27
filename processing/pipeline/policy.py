@@ -1,12 +1,14 @@
 """v2 정책 엔진 — 도메인 팩을 컴포지션 시점에 검증한다.
 
-**설계 의도**: 정책은 팩이 선택한 전략의 capability 태그를 검사해 "이 조합이 도메인 규정을
-준수하는가"를 컴포지션 시점(run_ingest 진입부)에 판별한다. 규정 위반이 런타임 깊숙이
-전파되기 전에 조기 실패(fast-fail) 시킨다.
+**흐름에서의 위치**: 파이프라인이 파일을 처리하기 **직전**에 한 번 돈다. 팩이 고른 전략들이
+어떤 성질(태그)을 갖는지 보고, 그 도메인이 허용하지 않는 조합이면 그 자리에서 멈춘다.
 
-constraint 는 팩이 고른 전략의 capability 태그를 검사한다. 단계 B는 NoExternalLLM
-(외부 LLM 전략 금지)만 의료에 적용한다. PHI 선행·결정성 스코어러·Negative Override 등
-cross-asset/PHI 관련 constraint 는 단계 C에서 추가한다.
+**왜 실행 전에 보는가**: 위반이 처리 도중에 드러나면 이미 절반쯤 쓴 상태에서 멈춘다.
+규정 위반은 되돌리기가 특히 어려우므로(예: 외부로 나간 호출은 취소할 수 없다) 배선을
+확인하는 단계에서 걸러 낸다.
+
+지금 걸린 제약은 의료의 **외부 LLM 금지** 하나다. 자산 사이 단계·비식별화 관련 제약은
+그 팩을 실제로 배선할 때 함께 추가한다.
 """
 from __future__ import annotations
 
@@ -26,8 +28,14 @@ class Constraint(Protocol):
     def check(self, pack: DomainPack, registry: StrategyRegistry) -> str | None:
         """정책 위반 여부를 판정한다.
 
+        Args:
+            pack: 검사할 도메인 팩(어느 슬롯에 어느 전략을 쓰기로 했는지).
+            registry: 전략 성질을 조회할 레지스트리. 팩은 이름만 갖고 있어서, 그 이름이
+                가리키는 전략의 태그는 여기서 찾아야 한다.
+
         Returns:
-            위반이면 **사람이 읽을 사유 문자열**, 통과면 ``None``.
+            위반이면 **사람이 읽을 사유 문자열**, 통과면 ``None``. 예외가 아니라 문자열인
+            이유는 여러 제약의 위반 사유를 모아 한 번에 보여 주기 위해서다.
         """
         ...
 
@@ -36,10 +44,9 @@ class Constraint(Protocol):
 class ForbidTag:
     """팩의 어느 슬롯 전략도 이 태그를 가지면 안 된다.
 
-    **알려진 한계(단계 D=3년차 이연·2026-07-06 이전)**: ``check`` 는 ``pack.per_asset`` 슬롯만 순회한다.
-    ``pack.cross_asset`` 슬롯은 현재 검사하지 않는다. 따라서 단계 D 에서 의료 cross_asset 에
-    'external_llm' 태그를 가진 전략을 배선하더라도 medical_strict 의 ForbidTag 가 통과해버린다.
-    단계 D 착수 전에 cross_asset 슬롯도 순회하도록 보완해야 한다.
+    ⚠️ **알려진 구멍**: 자산 하나를 처리하는 슬롯만 본다. 자산 사이를 잇는 슬롯은 검사하지
+    않으므로, 거기에 금지 태그를 가진 전략을 배선해도 **통과해 버린다**. 의료 관계 전략을
+    실제로 배선하기 전에 반드시 자산 사이 슬롯까지 순회하도록 고쳐야 한다.
     """
 
     tag: str
@@ -47,7 +54,14 @@ class ForbidTag:
     def check(self, pack, registry) -> str | None:
         """자산 단위 슬롯 전략들이 금지 태그를 갖고 있지 않은지 확인한다.
 
-        ⚠️ **자산 사이(cross-asset) 슬롯은 아직 보지 않는다** — 클래스 docstring 참조.
+        ⚠️ **자산 사이 슬롯은 아직 보지 않는다** — 클래스 설명의 구멍 참조.
+
+        Args:
+            pack: 검사할 팩.
+            registry: 전략 이름 → 태그를 찾을 곳.
+
+        Returns:
+            금지 태그를 가진 슬롯이 있으면 그 사유, 없으면 ``None``.
         """
         for slot, name in pack.per_asset.items():
             if self.tag in registry.tags(slot, name):
@@ -67,7 +81,16 @@ class RequireTag:
     tag: str
 
     def check(self, pack, registry) -> str | None:
-        """지정 슬롯의 전략이 필수 태그를 갖고 있는지 확인한다(슬롯 자체가 없어도 위반)."""
+        """지정 슬롯의 전략이 필수 태그를 갖고 있는지 확인한다.
+
+        Args:
+            pack: 검사할 팩.
+            registry: 전략 이름 → 태그를 찾을 곳.
+
+        Returns:
+            사유 문자열, 또는 통과면 ``None``. **슬롯 자체가 없어도 위반**이다 —
+            필수 조건을 건 슬롯이 비어 있으면 조건이 지켜졌다고 볼 수 없다.
+        """
         name = pack.per_asset.get(self.slot)
         if name is None:
             return f"슬롯 '{self.slot}' 미정의"
@@ -92,10 +115,18 @@ POLICIES: dict[str, DomainPolicy] = {
 
 
 def validate(pack: DomainPack, registry: StrategyRegistry) -> None:
-    """팩의 정책을 검증한다. 위반 시 PolicyViolation.
+    """팩의 정책을 검증한다 — 위반이면 처리를 시작하지 않는다.
 
-    **호출 시점**: run_ingest 진입부(policy_validate 스테이지)에서 파일당 1회 호출된다.
-    팩 구성이 사실상 고정(frozen dataclass·얕은 동결이나 변조 금지 관례)이므로 중복 검증 비용은 무시할 수준이다.
+    파일마다 한 번 도는데, 팩 구성은 사실상 고정이라 같은 검사를 반복하는 비용은 무시할
+    수준이다. 그보다 **어떤 파일도 검사 없이 지나가지 않는 것**이 중요하다.
+
+    Args:
+        pack: 검사할 도메인 팩.
+        registry: 전략 성질을 조회할 레지스트리.
+
+    Raises:
+        PolicyViolation: 등록되지 않은 정책 이름이거나, 제약을 하나라도 어겼을 때.
+            **위반 사유를 모아서** 한 번에 알린다 — 하나 고치고 다시 돌리는 왕복을 줄인다.
     """
     policy = POLICIES.get(pack.policy)
     if policy is None:

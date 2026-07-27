@@ -26,7 +26,7 @@ def _extract_audio_meta(ctx: ExtractContext) -> AssetRecord:
     file = ctx.file_path
     stt_result = transcribe_audio_local(file_path=file)
     meta = extract_audio_meta(file_path=file)
-    # 무내용 가드(spec 065 FR-701): STT 전사가 비었거나 얇으면 요약기가 LLM 을 호출하지 않고
+    # 무내용 가드: 전사가 비었거나 너무 짧으면 요약기가 LLM 을 부르지 않고
     # summary='' 를 돌려준다(기악 오디오 등 placeholder 요약 원천 차단). 빈 summary → 자기주제 미부여.
     meta = meta | summarize_and_extract_keywords_from_audio(text=stt_result["text"])
 
@@ -39,11 +39,18 @@ def _extract_audio_meta(ctx: ExtractContext) -> AssetRecord:
 def _embed_audio(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
     """STT 전사 텍스트를 청크 단위로 임베딩해 EmbeddingItem 목록을 반환한다.
 
-    텍스트 skill 과 동일한 ST(SentenceTransformer) 채널 단일 임베딩 방식이다.
-    채널·모델은 활성 임베딩 프로파일(018)로 결정한다(기본 active='st'·KoSimCSE → 회귀 0).
-    CLIP 채널이 없는 이유: 오디오는 시각 정보가 없으므로 이미지/영상과 달리 ST 만 생성한다.
-    STT 전사 텍스트는 ctx.scratch["stt_text"] 에서 꺼내므로 whisper 를 재실행하지 않는다.
-    계약 위반(extract 없이 단독 호출) 시 RuntimeError 로 즉시 탐지된다.
+    시각 채널을 만들지 않는다 — 오디오에는 볼 것이 없다. 텍스트 채널 하나만 쓴다.
+
+    Args:
+        ctx: 처리 문맥. ⚠️ **추출 단계가 남긴 전사 텍스트가 실려 있어야 한다** — 음성
+            인식을 다시 돌리지 않기 위해 넘겨받는 구조이고, 없으면 예외로 즉시 알린다.
+        rec: 추출 레코드. 이 함수는 읽지 않는다(슬롯 계약을 맞추려는 인자).
+
+    Returns:
+        청크마다 한 항목.
+
+    Raises:
+        RuntimeError: 같은 문맥으로 추출을 먼저 돌리지 않았을 때.
     """
     from src.embedders.text_embedder import embedding_plain_text_chunks
 
@@ -59,7 +66,7 @@ def _embed_audio(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         chunk_size=cfg.embed.chunk_size,
         embedding_model_name=model,
         normalize_embeddings=cfg.embed.normalize,
-        channel=channel,   # 062: 채널 백엔드(로컬/API)로 라우팅. 기본 st=로컬(동작 불변).
+        channel=channel,   # 채널이 로컬 모델이냐 원격 API 냐를 정한다.
         settings=cfg,
     )
     return [

@@ -15,11 +15,17 @@ from functools import lru_cache
 
 @lru_cache(maxsize=64)
 def _compiled(lexicon: frozenset[str]):
-    """어휘 사전 → (라틴 단어경계 정규식 | None, 한글 용어 집합). 사전별 캐시.
+    """어휘 사전을 매칭용 형태로 컴파일한다(사전별로 캐시).
 
-    latin 을 길이 내림차순으로 정렬하는 이유: 정규식 교대(|) 는 첫 매칭에서 멈추므로
-    긴 패턴을 앞에 두어야 짧은 부분 패턴이 먼저 소비되는 문제를 막는다.
-    frozenset 인수는 해시 가능 → lru_cache 가 프로파일당 한 번만 컴파일.
+    ⚠️ **긴 것부터 정렬해야 한다.** 정규식 교대는 먼저 맞는 것에서 멈추므로, 짧은 패턴이
+    앞에 있으면 긴 용어의 앞부분만 먹고 끝난다.
+
+    Args:
+        lexicon: 어휘 집합. **변경 불가 집합이어야** 캐시 키로 쓸 수 있다 — 그래서 사전마다
+            딱 한 번만 컴파일된다.
+
+    Returns:
+        ``(라틴 문자용 정규식 또는 None, 한글 용어 집합)``. 라틴 용어가 없으면 정규식은 ``None``.
     """
     latin = sorted({t for t in lexicon if t.isascii()}, key=len, reverse=True)
     korean = frozenset(t for t in lexicon if not t.isascii())
@@ -32,11 +38,18 @@ def _compiled(lexicon: frozenset[str]):
 
 
 def count_hits(text: str, lexicon: frozenset[str]) -> tuple[int, list[str]]:
-    """(hit 수, 매칭 용어 ≤20). 어휘 사전당 단어경계(ASCII)/부분문자열(한글) 매칭.
+    """텍스트에 사전 용어가 몇 개나 나오는지 센다.
 
-    반환 용어 수를 20개로 제한하는 이유: 디버그·로그 크기 제어용이며 hit 수 자체는
-    집합 크기(len(hits))로 정확히 계산된다.
-    hit 는 중복 없는 set — 같은 어휘가 여러 번 등장해도 1로 센다(존재 여부).
+    **같은 용어가 여러 번 나와도 1로 센다** — 재료는 "몇 종류가 나오는가"이지 빈도가 아니다.
+    라틴 문자는 단어 경계로, 한글은 부분 문자열로 찾는다(한글은 조사가 붙어 경계가 흐리다).
+
+    Args:
+        text: 스캔할 텍스트. ``None`` 이어도 안전하다.
+        lexicon: 어휘 집합.
+
+    Returns:
+        ``(맞은 용어 종류 수, 맞은 용어 목록)``. **목록만 20개로 자른다** — 로그가 비대해지는
+        것을 막기 위해서이고, 앞의 개수는 자르지 않은 정확한 값이다.
     """
     text = text or ""
     latin_re, korean = _compiled(lexicon)

@@ -41,7 +41,19 @@ def dispatch_extract_meta(ctx: ExtractContext) -> AssetRecord:
 
 
 def dispatch_embed(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
-    """``ctx.modality`` 에 맞는 임베딩 함수(_embed_*)를 호출."""
+    """모달리티에 맞는 임베딩 함수로 보낸다.
+
+    Args:
+        ctx: 처리 문맥. ⚠️ **추출 단계가 남긴 중간 산출물이 여기 실려 있어야 한다** —
+            같은 문맥으로 추출을 먼저 돌리지 않으면 각 임베딩 함수가 예외를 낸다.
+        rec: 추출이 만든 자산 레코드(임베딩할 원문·캡션이 들어 있다).
+
+    Returns:
+        임베딩 항목 목록.
+
+    Raises:
+        UnsupportedModalityError: 다룰 수 없는 모달리티일 때.
+    """
     modality = ctx.modality
     if modality in ALLOWED_TEXT_META_FILE_KINDS:
         return _embed_text(ctx, rec)

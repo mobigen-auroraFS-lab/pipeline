@@ -1,10 +1,12 @@
-"""F-4.3 하이브리드 검색 CLI 진입점 — 한국어 질의로 asset_* 인덱스를 검색해 결과를 출력한다.
+"""검색 CLI — 한국어 질의로 색인을 검색해 결과를 출력한다.
 
-예) python -m processing.app.run_search --env dev --query "작년 워크숍 발표자료" --modalities text,image
+예) ``python -m processing.app.run_search --env dev --query "작년 워크숍 발표자료"``
 
-검색은 파이프라인(run_ingest/run_relations) 밖의 라이브러리 계층이라 레지스트리·도메인 팩
-import 부수효과가 필요 없다. 질의 구조화 LLM 은 공통 seam(``src.llm.client``)을 쓰고, 검색은
-OpenSearch 단일 백엔드(037·BM25+kNN)를 ``search_hybrid`` seam 경유로만 조회한다(PG 직조회 아님).
+**흐름에서의 위치**: 적재·관계 파이프라인 **밖**이다. 그래서 전략 레지스트리도 도메인 팩도
+필요 없어 그 등록 부수효과를 일으키지 않는다.
+
+검색은 반드시 코어 검색 함수를 거친다 — DB 를 직접 조회하지 않는다. 그래야 CLI 와 HTTP
+백엔드가 **같은 결과**를 낸다.
 """
 
 from __future__ import annotations
@@ -19,12 +21,20 @@ from src.search.search_service import search_hybrid
 
 
 def _resolve_modalities(raw: str | None) -> list[str] | None:
-    """``--modalities`` 를 공유 파서로 파싱한 뒤 유효값을 검증한다(069 T301·D5).
+    """모달리티 옵션을 파싱하고 허용값인지 검증한다.
 
-    파싱(split/strip/소문자·미지정=None)은 ``parse_modalities_csv`` 단일 출처를 쓰고, 유효값 밖
-    모달리티는 ``ValueError`` 로 거부한다(069 P3-12). 이 예외는 ``main`` 이 ``parser.error`` 로
-    변환해 raw traceback 대신 명확한 CLI 에러+usage 로 안내한다(예전엔 search_hybrid 내부에서
-    ValueError 가 터져 traceback 이 그대로 노출됐다).
+    파싱 규칙은 공용 파서 하나만 쓴다 — CLI 와 HTTP 가 다른 규칙을 갖게 되면 같은 문자열이
+    다르게 해석된다.
+
+    Args:
+        raw: 콤마로 이은 문자열. ``None``·빈 값이면 **전체**를 뜻한다.
+
+    Returns:
+        검증된 목록, 또는 전체를 뜻하는 ``None``.
+
+    Raises:
+        ValueError: 허용 밖 모달리티가 섞였을 때. 호출부(``main``)가 이것을 CLI 사용법
+            안내로 바꾼다 — 그냥 흘리면 사용자가 스택 트레이스를 보게 된다.
     """
     mods = parse_modalities_csv(raw)
     if mods is None:
@@ -42,9 +52,15 @@ def _run(
     *,
     search_fn: Callable[..., dict[str, Any]] = search_hybrid,
 ) -> dict[str, Any]:
-    """파싱된 인자를 검색 서비스 호출로 매핑한다. ``search_fn`` 은 테스트 주입 seam.
+    """파싱된 인자를 검색 호출로 옮긴다 — 전역 설정을 읽지 않는 순수 매핑이다.
 
-    ``_run`` 은 settings 전역에 의존하지 않아 순수 매핑으로 단위 테스트된다.
+    Args:
+        args: 파싱된 명령행 인자.
+        search_fn: 검색 함수. **바꿔 끼울 수 있게 열어 뒀다** — 검색 엔진 없이 인자 전달만
+            단위로 검증할 수 있다.
+
+    Returns:
+        검색 결과 dict(그대로 출력용).
     """
     return search_fn(
         args.query,
@@ -85,7 +101,7 @@ def main() -> int:
     args = parser.parse_args()
 
     # 모달리티 검증을 부트스트랩(.env 로드·init_settings) **이전**에 수행한다 — 오타는 raw traceback·
-    # 불필요한 DB 초기화 없이 즉시 명확한 에러+usage 로 거부(069 P3-12, parser.error → exit 2).
+    # DB 를 열기 **전에** 거부한다 — 인자가 틀렸는데 연결부터 맺으면 실패까지 오래 걸린다.
     # 아래 _run 이 동일 파서로 재해석하나 순수·저비용이라 무해하다(검증은 여기서 이미 통과 확정).
     try:
         _resolve_modalities(args.modalities)

@@ -61,15 +61,22 @@ def _extract_image_meta(ctx: ExtractContext) -> AssetRecord:
 
 
 def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
-    """이미지 임베딩을 생성해 반환한다 — 기본 2채널(ST·CLIP), 063 ``embed_enable_clip=False`` 시 ST 단일.
+    """이미지 임베딩을 만든다 — 기본은 텍스트·시각 2채널, 시각 채널을 끄면 텍스트 하나만.
 
-    ST(SentenceTransformer): VLM 이 생성한 캡션+키워드+라벨을 텍스트로 직렬화해 임베딩.
-    텍스트 채널·모델은 활성 임베딩 프로파일(018)로 결정한다(기본 active='st'·KoSimCSE → 회귀 0).
-    CLIP: _extract_image_meta 에서 저장한 벡터를 ctx.scratch["clip_vec"] 로 재사용(시각 채널은 무변경).
-    063: CLIP 임베딩 항목은 ``cfg.embed.enable_clip``(기본 True) 일 때만 추가(off=ST 캡션만·라벨·계약 불변).
+    두 채널을 만든다: 그림 설명을 **글로 옮겨** 만든 텍스트 벡터와, 그림 자체의 시각 벡터.
+    글로 옮긴 쪽이 있어야 "김치 담그는 사진" 같은 한국어 질의가 걸린다.
 
-    ``chunk_content`` 가 공백뿐이면 " " 로 대체 — pad 후 영벡터에 가깝지만 DB 삽입은 성공한다.
-    1536D 통일은 ``pad_embedding_to_storage_dim`` 이 담당한다(CLIP 벡터는 이미 1536D 패딩됨).
+    Args:
+        ctx: 처리 문맥. ⚠️ **추출 단계가 남긴 시각 벡터가 실려 있어야 한다** — 무거운 시각
+            모델을 두 번 돌리지 않기 위해 넘겨받는 구조이고, 없으면 예외로 즉시 알린다.
+        rec: 추출 레코드. 여기서 캡션·키워드·라벨을 읽어 텍스트 채널 입력을 만든다.
+
+    Returns:
+        임베딩 항목. 시각 채널을 끄면 텍스트 하나만 나온다(라벨·계약은 그대로).
+        설명이 텅 비면 공백 한 칸을 넣는다 — 저장은 성공해야 하기 때문이다.
+
+    Raises:
+        RuntimeError: 같은 문맥으로 추출을 먼저 돌리지 않았을 때.
     """
     from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME
     from src.embedders.text_embedder import embed_texts_for, pad_embedding_to_storage_dim
@@ -82,8 +89,8 @@ def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
     chunk_content = build_image_vlm_text_for_embedding(meta)
     if not chunk_content.strip():
         chunk_content = " "
-    # 062: VLM 캡션 ST 임베딩도 채널 백엔드(로컬/API)로 라우팅 — st_api 활성 시 적재=질의 정합
-    #   (text/audio 와 동일). 기본 st/st_bge=로컬(동작 불변). embed_texts_for 가 model 해소를 담당.
+    # 캡션 임베딩도 채널이 정한 백엔드(로컬 모델/원격 API)로 보낸다 — 적재와 질의가 같은 모델을 써야
+    #   (텍스트·오디오와 동일). 어느 모델을 쓸지는 임베딩 함수가 채널로 해소한다.
     st_raw = embed_texts_for(
         [chunk_content],
         channel=channel,
@@ -97,7 +104,7 @@ def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         raise RuntimeError("_embed_image: ctx.scratch['clip_vec'] 없음 — _extract_image_meta 를 같은 ctx 로 먼저 실행해야 합니다.")
     # chunk_index=0: 이미지는 단일 청크(비텍스트 미디어 공통).
     items = [EmbeddingItem(channel=channel, vector=st_vec, model_name=model, chunk_index=0)]
-    # 063: clip 임베딩 토글(기본 True=기존 동치). off면 clip 채널 항목만 스킵(라벨·계약·검색 불변).
+    # 시각 채널 토글. 끄면 그 항목만 빠지고 나머지 계약은 그대로다.
     if cfg.embed.enable_clip:
         items.append(
             EmbeddingItem(channel=_CHANNEL_CLIP, vector=clip_vec, model_name=DEFAULT_CLIP_MODEL_NAME, chunk_index=0)

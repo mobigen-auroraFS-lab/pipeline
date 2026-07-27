@@ -44,7 +44,7 @@ class ExtractContext:
 class AssetRecord:
     """추출 결과의 통일 표현. asset_metadata(core/ext/tags) + asset_embedding(embeddings).
 
-    037(OS 전용): 종전 PG FTS 평문 입력 필드를 제거했다. 풀텍스트 색인은 OpenSearch
+    풀텍스트 색인 입력 필드를 두지 않는다 — 색인은 검색 엔진
     동기화가 ``ext_meta`` 에서 생성하므로 적재 계약에 별도 FTS 입력이 필요 없다.
     """
 

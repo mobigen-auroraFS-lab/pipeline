@@ -1,22 +1,13 @@
 """샘플 도메인 팩 cross_asset 전략(결정적·비학습·무LLM).
 
-목적(spec 016)
-    008 이 만든 cross_asset 슬롯 resolve seam 의 **성공 경로**를, ``contracts.py`` 에
-    정의돼 있으나 한 번도 실행된 적 없는 cross_asset 계약 4종으로 처음 실행해 증명한다.
-    이 모듈은 그 계약을 만족하는 **트리비얼·결정적 데모 전략**이다.
+**흐름에서의 위치**: 샘플 팩이 자산 사이 네 슬롯에 끼우는 전략들이다. 실제 관계 품질이
+목적이 아니라, **조합형 구조가 끝까지 도는지 보여 주는 것**이 목적이다.
 
-헌법 준수
-    - 1조(비학습): 학습/파인튜닝/.fit 없음 — 사전계산된 임베딩 유사도와 고정 규칙만 사용.
-    - 2조(LLM 단일 seam): LLM 을 전혀 호출하지 않는다(샘플은 결정적 규칙 점수).
-    - 3조(결정성 100%): 정렬 tiebreak 는 target asset_id 오름차순으로 고정한다.
-    - 6조(스키마 불변): persist 는 기존 ``graph_edge`` + 기존 ``relation_kind`` 어휘만
-      재사용한다. 신규 테이블·컬럼·마이그레이션·relation_kind 카탈로그 등록 없음.
-
-계약(contracts.py Protocol)
-    - ``sample_candidates(conn, source_asset_id) -> list[Candidate]``      # CandidateStage
-    - ``sample_score(conn, pairs) -> list[ScoredPair]``                     # ScoreStage
-    - ``sample_decide(scored) -> list[Decision]``                          # DecideStage
-    - ``sample_persist_edges(conn, decisions) -> None``                    # EdgePersistStage
+지켜야 할 것
+    - 학습하지 않는다 — 사전 계산된 임베딩과 고정 규칙만 쓴다(헌법 1조).
+    - LLM 을 부르지 않는다 — 데모가 모델 가용성에 매이면 구조 검증이 안 된다(헌법 2조).
+    - 순서를 못 박는다 — 동점이면 대상 자산 id 순으로 갈라 매번 같은 결과를 낸다(헌법 3조).
+    - 스키마를 늘리지 않는다 — 기존 엣지 테이블과 기존 관계 어휘만 재사용한다(헌법 6조).
 """
 from __future__ import annotations
 
@@ -36,7 +27,7 @@ SAMPLE_TOP_K = 10
 SAMPLE_DECIDE_TAU = 0.5
 # 샘플 데모가 쓰는 기존 relation_kind 어휘(시드 active). 의미 약결합 데모용.
 SAMPLE_RELATION_KIND = "same_series"
-# 샘플 픽스처 격리 마커(FR-004): 이 경로 조각을 가진 registered 자산만 샘플 후보로 본다.
+# 샘플 격리 마커: 이 경로 조각을 가진 자산만 샘플 후보로 본다.
 # 전역 임베딩 top-k(find_embedding_candidates)는 운영 임베딩 수천 건에 묻혀 샘플 픽스처를
 # 못 찾고, zero-norm 임베딩의 NaN 코사인이 정렬 최상위를 점유한다(2026-06-05 e2e 진단).
 # → 샘플은 경로 마커로 후보를 격리해 결정적·자기완결적으로 동작한다.
@@ -48,13 +39,18 @@ _COMPARATOR = "embedding_cosine"
 
 
 def sample_candidates(conn: Connection[Any], source_asset_id: str) -> list[Candidate]:
-    """``/sample_pack/`` 마커 자산을 결정적 이웃 후보로 선별(전역 임베딩 검색 비의존).
+    """샘플 경로 표식을 가진 자산만 후보로 추린다 — 운영 데이터와 섞이지 않게.
 
-    spec 016 e2e 격리 요구(2026-06-05 진단): 전역 ``find_embedding_candidates`` 는 운영
-    임베딩(수천 건)에 묻혀 샘플 픽스처를 못 찾고, zero-norm 임베딩의 NaN 코사인이 PG
-    ``ORDER BY DESC`` 최상위를 점유한다. 그래서 샘플 후보는 ``/sample_pack/`` 경로 마커를
-    가진 ``registered`` 자산으로 한정해(FR-004) 운영 데이터와 격리하고, **target asset_id
-    오름차순**으로 결정적 정렬한다(헌법 3조). spec FR-001 이 허용한 "결정적 픽스처 이웃" 방식.
+    일반 후보 탐색(임베딩 유사도 상위)을 그대로 쓰면 데모가 운영 데이터 수천 건에 묻혀
+    아무것도 못 찾는다. 게다가 벡터 길이가 0 인 임베딩이 섞이면 코사인이 NaN 이 되어
+    정렬 최상단을 차지해 버린다. 그래서 **경로 표식으로 후보를 격리**한다.
+
+    Args:
+        conn: DB 연결.
+        source_asset_id: 기준 자산. 자기 자신은 후보에서 뺀다.
+
+    Returns:
+        후보 목록. 대상 자산 id 오름차순으로 순서가 고정된다(헌법 3조).
     """
     sql = """
         SELECT a.asset_id::text AS id
@@ -83,18 +79,19 @@ def sample_candidates(conn: Connection[Any], source_asset_id: str) -> list[Candi
 
 
 def sample_score(conn: Connection[Any], pairs: list[Candidate]) -> list[ScoredPair]:
-    """후보를 **소스↔후보 쌍 코사인**으로 채점(결정적·LLM 미호출).
+    """후보마다 기준 자산과의 임베딩 유사도를 점수로 매긴다(LLM 미호출).
 
-    헌법 2조: LLM seam 을 전혀 호출하지 않는다. 점수는 소스와 각 후보의 같은 채널 임베딩
-    코사인 유사도(사전계산 벡터)라는 고정 규칙이다.
+    **후보 전부를 한 번의 조회로 채점한다** — 후보마다 따로 물으면 왕복이 후보 수만큼
+    늘고, 조회 시점이 달라 결과가 흔들릴 여지도 생긴다.
 
-    설계(전역 랭킹 비의존)
-        모든 pair 의 source_id 가 동일하다는 계약 전제 하에, 소스와 **후보 집합 한정**으로
-        같은 채널 임베딩 쌍의 MAX 코사인을 한 번에 조회해 ``{target_id: sim}`` 맵을 만든다.
-        전역 top-k 가 아니라 주어진 후보만 채점하므로 운영 데이터·NaN 정렬에 영향받지 않는다.
-        zero-norm 등으로 sim 이 비유한(NaN/inf)이면 0.0 으로 보수 처리한다(결정성·안전).
-        후보가 맵에 없으면(임베딩 부재 등) 0.0. ``Evidence(field='embedding',
-        comparator='embedding_cosine')`` 부착. 조회 1회를 공유하므로 2회 동일 출력(결정성).
+    Args:
+        conn: DB 연결.
+        pairs: 채점할 후보. **모든 쌍의 기준 자산이 같다는 전제**로 첫 항목에서 기준을
+            읽는다 — 섞어 넣으면 엉뚱한 자산과의 유사도가 매겨진다.
+
+    Returns:
+        점수와 근거가 붙은 쌍 목록(입력 순서 보존). 임베딩이 없거나 값이 NaN·무한대면
+        **0.0 으로 접는다** — 이상값이 상위를 차지하는 것을 막는다.
     """
     if not pairs:
         return []
@@ -137,11 +134,16 @@ def sample_score(conn: Connection[Any], pairs: list[Candidate]) -> list[ScoredPa
 
 
 def sample_decide(scored: list[ScoredPair]) -> list[Decision]:
-    """결정적 임계로 verdict 결정(순수 함수, conn 불필요).
+    """점수가 임계 이상이면 잇기로 판정한다(순수 함수 — DB 를 보지 않는다).
 
-    규칙: ``score >= SAMPLE_DECIDE_TAU`` 이면 'match', 아니면 'non_match'.
-    경계값(score == τ)은 ``>=`` 로 match 쪽에 결정적으로 포함한다(헌법 3조).
-    입력 순서를 보존하므로 동점·경계 입력이라도 동일 입력 2회 동일 출력이다.
+    경계값은 **잇는 쪽**에 포함한다. 어느 쪽이든 상관없지만, 한쪽으로 못 박아 두지 않으면
+    같은 점수가 실행마다 다르게 갈릴 여지가 생긴다(헌법 3조).
+
+    Args:
+        scored: 점수가 매겨진 쌍.
+
+    Returns:
+        판정 목록. **입력 순서를 그대로 보존한다** — 잇지 않기로 한 것도 함께 담는다.
     """
     out: list[Decision] = []
     for sp in scored:
@@ -153,20 +155,19 @@ def sample_decide(scored: list[ScoredPair]) -> list[Decision]:
 
 
 def sample_persist_edges(conn: Connection[Any], decisions: list[Decision]) -> None:
-    """verdict=='match' 결정만 기존 ``graph_edge`` 로 upsert(헌법 6조: 스키마 불변).
+    """잇기로 판정한 것만 기존 엣지 테이블에 저장한다(스키마를 늘리지 않는다·헌법 6조).
 
-    재사용
-        기존 ``graph_persist.sync_graph_edges`` 헬퍼 한 곳으로만 적재한다. 신규 테이블·
-        컬럼·마이그레이션·relation_kind 카탈로그 등록은 일절 하지 않는다. relation_type_code
-        는 시드 active 어휘 ``SAMPLE_RELATION_KIND``('same_series')만 사용한다(데모 의미
-        약결합). ``allowed_target_ids`` 는 match 타깃 집합으로 두어 sync_graph_edges 의
-        환각 방지 게이트(후보 집합 밖 타깃 거부)와 정합시킨다.
+    저장은 **공용 헬퍼 한 곳**으로만 한다 — 직접 INSERT 를 쓰면 그쪽에 있는 안전장치
+    (자기참조 거부·후보 밖 대상 거부)를 통째로 우회하게 된다. 관계 종류도 이미 시드된
+    어휘 하나만 쓴다(데모라 의미를 느슨하게 붙인다).
 
-    설계
-        Decision('match') 한 건 → sync_graph_edges 가 받는 edge dict 한 건으로 매핑한다
-        (target_media_item_id / relation_type_code / confidence=score / reason). 모든
-        결정의 source_id 가 동일하다는 계약 전제 하에 첫 match 의 source 를 쓴다.
-        'non_match' 는 건너뛰며, match 가 하나도 없으면 적재 호출 자체를 생략한다.
+    Args:
+        conn: 호출자가 연 연결(트랜잭션 경계는 밖).
+        decisions: 판정 목록. **잇지 않기로 한 것도 섞여 온다** — 여기서 걸러 낸다.
+            모든 판정의 기준 자산이 같다는 전제로 첫 건에서 기준을 읽는다.
+
+    저장할 것이 하나도 없으면 **호출 자체를 생략한다** — 빈 호출도 노드 보장 같은
+    부수 작업을 일으키기 때문이다.
     """
     matches = [d for d in decisions if d.verdict == "match"]
     if not matches:
@@ -183,8 +184,8 @@ def sample_persist_edges(conn: Connection[Any], decisions: list[Decision]) -> No
         }
         for d in matches
     ]
-    # 013: 샘플 팩은 슬롯 조합 데모 전용 — 계보(asset_lineage) 기록 대상 외라 collect 미전달.
-    # 프로덕션 관계 제안(asset_entry.propose_relations_for_asset)만 generated.edges 로 쌍을 남긴다.
+    # 계보를 남기지 않는다 — 데모가 만든 엣지가 운영 계보에 섞이면 "언제 무엇이 이어졌나"를
+    # 되짚을 때 잡음이 된다. 계보는 운영 관계 제안 경로만 남긴다.
     sync_graph_edges(
         conn,
         source_asset_id=source_id,

@@ -60,9 +60,18 @@ class StrategyRegistry:
             raise KeyError(f"미등록 전략: slot={slot!r} name={name!r}") from e
 
     def tags(self, slot: str, name: str) -> frozenset[str]:
-        """전략의 capability 태그 집합 반환. 미등록이면 KeyError.
+        """전략의 성질 태그를 돌려준다 — 정책 검사가 이것을 보고 위반을 판정한다.
 
-        policy.py 의 Constraint.check 가 이 메서드로 태그를 조회해 정책 위반 여부를 판단한다.
+        Args:
+            slot: 어느 단계인지.
+            name: 전략 이름.
+
+        Returns:
+            태그 집합(빈 집합일 수 있다).
+
+        Raises:
+            KeyError: 없는 슬롯·이름일 때. **빈 집합으로 얼버무리지 않는다** — 그러면
+                오타 난 전략이 '아무 성질도 없는 안전한 전략'으로 통과해 버린다.
         """
         try:
             return self._slots[slot][name].tags

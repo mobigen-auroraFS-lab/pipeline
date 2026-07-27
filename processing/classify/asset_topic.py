@@ -1,41 +1,25 @@
-"""자산 자기주제(aboutness) 분류 seam — 자기 내용에서 (topic, subtopic) 정본을 1회 확정(spec 065).
+"""자산의 주제를 **자기 내용만 보고** 한 번 확정한다 — 이웃이 아니라 자기 자신에서.
 
-왜 이 seam 인가 (spec 065 §설계 원칙·ADR 2026-07-08)
-    지금까지 자산 주제는 관계 이웃 엣지(``graph_edge.topic``)를 자산으로 투영해 만들었다
-    (``topic_query.project_asset_topics``). 엣지 topic 은 관계 LLM 이 쌍(pairwise) 비교 중 붙이는
-    라벨이라 상대 자산 쪽으로 치우치고, 어떤 이웃 엣지가 활성 임계를 넘느냐(이웃 운)에 따라 자산
-    주제가 흔들려 오염됐다(농구 영상이 축구·배드민턴으로 노출). 065 는 "주제(무엇인가)"와
-    "관계(어떻게 연결되나)"를 분리한다 — 주제를 **자산 자기 내용(summary/keywords/labels)에서
-    1회 확정한 정본**(``asset_topic`` 테이블·v299)으로 둔다. 같은-주제 묶음·패싯은 전부 이 정본
-    조인으로 파생한다(관계 파이프라인 불변).
+**흐름에서의 위치**: 적재 막바지에 자산당 한 번 돈다. 확정된 주제는 전용 테이블에 남고,
+같은-주제 묶기·주제 패싯은 전부 그 테이블을 조인해 파생한다.
 
-하이브리드 판정 (FR-202·068 G1·G4)
-    ① 자기 텍스트 구성(``build_self_text``) → ② 레지스트리 **전체-27 topic 후보** 조회(닫힌 대분류
-    전체·``topic_candidates_for_self_text``; kNN 축소가 정답 topic 을 누락시켜 미부여를 낳던 것을 068 G1
-    에서 폐기) → ③ LLM(단일 seam·temp=0)이 **닫힌 후보 집합에서 topic 1개 확정**(후보 밖이면 1회
-    재질의·재실패 시 미부여) → ④ subtopic 도 부모 topic 의 **닫힌 시드 목록**에서 LLM 이 선택
-    (``fetch_closed_subtopics`` → ``_pick_subtopic_via_llm``; 068 G4 — 058 ``canonicalize_subtopic`` 열린
-    어휘 재사용이 과병합·과코스닝(여행>관광지 64%)을 낳아 폐기, 시드 미존재/none 이면 subtopic 미부여) →
-    ⑤ topic_en/subtopic_en 은 registry 정본 조회(``_lookup_topic_en``/``_lookup_subtopic_en``) →
-    ⑥ ``asset_topic`` upsert(멱등·policy_version 기록).
+**왜 이웃이 아니라 자기 내용인가**
+    예전에는 관계 엣지에 붙은 라벨을 자산 주제로 끌어다 썼다. 그 라벨은 두 자산을 견주며
+    붙은 것이라 **상대 쪽으로 기울고**, 어떤 이웃이 활성 임계를 넘느냐는 운에 좌우된다 —
+    농구 영상이 축구·배드민턴으로 노출되는 식이다. "이것은 무엇인가"와 "무엇과 이어지나"는
+    다른 질문이므로 분리했다.
 
-헌법·불변식
-    - **결정성(3조)**: temp=0 + 닫힌 topic 후보 + **닫힌 subtopic 시드 후보** + 멱등 upsert →
-      같은 입력 같은 (topic, subtopic)(SC-05).
-    - **LLM 단일 seam(6조)**: ``src.llm.client.complete_json``·``client=`` 주입.
-    - **닫힌집합 검증(FR-203)**: LLM 이 후보 밖 topic 을 답하면 1회 재질의 후 실패 시 미부여(강제
-      매핑 금지·환각 차단). 전체-27 후보가 비면(레지스트리 미시드) 분류 스킵.
-    - **실패 격리(FR-204)**: 예외는 삼키지 않고 올린다 — 호출부(run_ingest)가 registered 를 유지한
-      채 주제만 미부여로 격리한다.
-    - **학습 0(3조)**: 레지스트리 조회·subtopic 임베딩·LLM zero-shot 전부 inference-only.
+판정 흐름: 자기 텍스트 구성 → **닫힌 대분류 전체**를 후보로 조회 → LLM 이 그중 하나 확정 →
+부모 아래 **닫힌 소분류 시드**에서 다시 하나 선택 → 영문 라벨은 레지스트리에서 조회 → 저장.
 
-재사용 (058·graph_query)
-    ``_lookup_topic_en`` 만 058 정본을 **모듈 상단에서 import** 해 쓴다(중복 구현 금지·테스트 patch 지점).
-    subtopic 은 068 G4 이후 058 ``canonicalize_subtopic``(열린 어휘 재사용) 대신 부모의 닫힌 시드 목록
-    LLM 선택(``fetch_closed_subtopics``+``_pick_subtopic_via_llm``)으로 정하므로 그 import 를 제거했다 —
-    058 함수 자체는 불변(관계 경로 graph_persist/backfill 이 계속 씀). topic 후보는 068 G1 이후 kNN 이
-    아니라 ``topic_registry`` 전체-27 직접 조회다. ``find_same_topic_groups`` 의 ``already_linked`` EXISTS
-    는 ``graph_query`` 대칭 엣지 규칙(양방향)을 따른다(순진한 단방향 ``WHERE src_node=X`` 금지).
+지켜야 할 것
+    - **후보를 좁히지 않는다.** 대분류가 스물 몇 개뿐이라 프롬프트에 전부 담을 수 있는데,
+      유사도로 추리면 정답이 후보에서 빠져 "해당 없음"이 나온다(미부여의 주된 원인이었다).
+    - **후보 밖 답은 받지 않는다.** 한 번 다시 묻고, 그래도 밖이면 **미부여**로 둔다 —
+      억지로 가장 가까운 것에 붙이면 틀린 주제가 조용히 정본이 된다.
+    - **catch-all 라벨은 후보에서 뺀다.** 남겨 두면 애매한 자산이 전부 그리로 몰린다.
+    - **예외를 삼키지 않는다.** 호출부가 자산은 등록된 채로 두고 주제만 미부여로 격리한다.
+    - 같은 입력이면 같은 결과다 — 온도 0 + 닫힌 후보 + 멱등 저장(헌법 3조).
 """
 from __future__ import annotations
 
@@ -44,41 +28,43 @@ from typing import Any
 
 from psycopg.rows import dict_row
 
-# 058 정본 프리미티브 재사용(모듈 상단 import = 테스트 patch 지점). 중복 구현 금지.
-# ``_lookup_topic_en``(topic_en 정본 조회)만 058 에서 가져온다. subtopic 은 068 G4 이후 058
-# ``canonicalize_subtopic``(열린 어휘 재사용)이 과병합·과코스닝을 낳아 폐기하고, 부모의 닫힌 시드 목록
-# LLM 선택(``fetch_closed_subtopics``+``_pick_subtopic_via_llm``·이 모듈 신설)으로 정하므로 그 import 를
-# 제거했다 — 058 함수 자체는 불변(관계 경로 graph_persist/backfill 이 strict 판정에 계속 씀). topic 후보도
-# 068 G1 이후 kNN 이 아니라 레지스트리 전체-27 직접 조회라 knn_topic_candidates 를 여기서 쓰지 않는다.
+# 영문 라벨 조회는 코어 정본을 그대로 쓴다(같은 조회를 두 벌 두면 한쪽이 낡는다).
+# 모듈 상단에서 import 하는 것은 테스트가 여기를 바꿔 끼우는 지점이기도 하다.
 from src.relations.topic_canonicalize import _lookup_topic_en
 
 logger = logging.getLogger(__name__)
 
-# 분류 정책 버전(FR-601) — 프롬프트/후보수 변경 시 증가시켜 재현성을 추적한다.
+# 분류 정책 버전 — 프롬프트나 후보 구성이 바뀌면 올린다. 저장된 결과가 어느 규칙으로 나온
+# 것인지 되짚을 유일한 단서다.
 POLICY_VERSION = "asset_topic.v1"
 
-# topic 후보수 기본값 — 068 G1 이후 전체-27 반환이라 후보 축소를 하지 않지만, ``k`` 파라미터
-# 하위호환(시그니처 유지·무시)을 위해 기본값 상수만 남겨둔다.
+# ⚠️ 후보를 좁히지 않으므로 이 값은 **쓰이지 않는다**. 호출부 시그니처를 깨지 않으려고
+# 기본값만 남겨 둔 것이다.
 _DEFAULT_TOPIC_K = 5
 
-# catch-all 파킹 라벨(058 관계가 공유·taxonomy_seed.json 에 존치). 065 자기주제 분류에서는 이 라벨을
-# **배제**한다(FR-702·SC-07·068 FR-103): 전체-27 후보 조회에서 SQL 로 제외 + LLM none 도피처 →
-# 미부여. seed·058 은 불변 — 제거는 이연(관계 경로 058 canonicalize 는 TOPIC_CANONICALIZE_ENABLED
-# 로 현역, 065 는 graph_edge.topic 소비만 중단). 배제하지 않으면 무내용/미적합 자산이 미분류
-# 폴더로 몰린다. 조회 파라미터의 단일 출처로 쓴다(매직스트링 방지).
+# 어디에도 안 맞는 것을 담아 두는 라벨. **주제 후보에서는 뺀다** — 남겨 두면 무내용·애매한
+# 자산이 전부 이리로 몰려 분류가 무의미해진다. 관계 쪽은 이 라벨을 계속 쓰므로 시드에서
+# 지우지는 않는다. 여기 한 곳에만 문자열을 두어 조회와 판정이 어긋나지 않게 한다.
 _UNCLASSIFIED_LABEL = "미분류"
 
 
 def build_self_text(
     summary: str | None, keywords: list | None, labels: list | None = None
 ) -> str:
-    """자기 텍스트 구성 — 결정적 순서(summary → keywords → 상위 라벨). 전부 비면 ''(FR-201).
+    """LLM 에 보여 줄 "이 자산의 내용" 한 덩어리를 만든다(순수 함수).
 
-    - ``summary``: 요약 문자열(공백만이면 제외).
-    - ``keywords``: 문자열 리스트(공백·None 원소 제외 후 공백 join).
-    - ``labels``: image/video 제로샷 라벨 ``[{label, score}]`` 가정 — ``label`` 문자열만 순서대로
-      사용(score 제외). 문자열 원소도 방어적으로 허용. 순서는 입력 순(제로샷 score desc)을 보존해
-      재실행마다 동일(헌법 3조). None/빈 입력은 전부 안전하게 건너뛴다.
+    **붙이는 순서를 고정한다** — 순서가 바뀌면 같은 자산에 다른 프롬프트가 만들어져
+    결과가 흔들린다(헌법 3조).
+
+    Args:
+        summary: 요약. 공백뿐이면 뺀다.
+        keywords: 키워드 목록. 빈 원소는 걸러 낸다.
+        labels: 이미지·영상 라벨. ``{label, score}`` 형태를 가정하되 **문자열 원소도 받는다**
+            (형태가 섞여 들어와도 죽지 않게). 점수는 쓰지 않고 **들어온 순서를 그대로** 쓴다.
+
+    Returns:
+        이어 붙인 문자열. 쓸 내용이 하나도 없으면 빈 문자열 — 호출부가 이것으로
+        "분류할 것이 없다"를 판단해 LLM 을 아예 부르지 않는다.
     """
     parts: list[str] = []
 
@@ -106,28 +92,27 @@ def build_self_text(
 def topic_candidates_for_self_text(
     conn, self_text: str | None, *, k: int = _DEFAULT_TOPIC_K
 ) -> list[str]:
-    """자기 텍스트가 있으면 레지스트리 **전체-27 topic 후보**(닫힌 대분류)를 반환(FR-101·068 G1).
+    """자기 텍스트가 있으면 **닫힌 대분류 전체**를 후보로 돌려준다.
 
-    빈/공백 텍스트면 ``[]``(비용 0·LLM 미호출 가드). 그 외에는 kNN 축소 없이 ``topic_registry`` 의
-    닫힌 대분류 전체를 후보로 준다:
-    ``parent_topic IS NULL AND source='taxonomy' AND topic_ko<>'미분류'`` 를 ``topic_ko`` 오름차순으로.
+    **후보를 유사도로 추리지 않는다.** 대분류가 스물 몇 개뿐이라 프롬프트에 전부 담을 수
+    있는데, 유사도 상위만 남기면 정답이 후보에서 빠져 LLM 이 정확히 "해당 없음"을 낸다 —
+    미부여의 주된 원인이었다.
 
-    **왜 전체-27 인가(068 이슈1·비자명 메커니즘)**: 후보가 이미 27개로 작아 프롬프트에 전부 담을 수
-    있는데, 닫힌 27집합에서 임베딩 kNN top-k 로 후보를 축소하면 정답 topic(양궁·구형컴퓨터 등)이 후보에서
-    누락돼 LLM 이 정확히 none 을 내고 만다(미부여·경계흡수의 원인). 그래서 kNN 대신 결정적 레지스트리
-    조회로 닫힌 대분류 전체를 제공해 누락을 없앤다. catch-all ``미분류`` 는 조회 단계에서 배제하고(강제
-    배정 방지·FR-103), 어느 것도 안 맞으면 LLM none 도피처로 미부여시킨다(억지 최근접 금지).
+    Args:
+        conn: DB 연결.
+        self_text: 자산 자기 텍스트. **비어 있으면 빈 목록**을 돌려줘 호출부가 LLM 을
+            아예 부르지 않게 한다(무내용 자산에 비용을 쓰지 않는다).
+        k: ⚠️ **쓰이지 않는다.** 후보를 좁히지 않으므로 상한 개념 자체가 없다 —
+            호출부 시그니처를 깨지 않으려고 남겨 둔 인자다.
 
-    **``k`` 파라미터(하위호환)**: 시그니처는 호출부·하위호환을 위해 유지하나 **무시**한다(전체 반환) —
-    후보 축소를 하지 않으므로 top-k 개념 자체가 없다.
-
-    Consumes: ``topic_registry``(v297·parent NULL·taxonomy). Produces: 닫힌 대분류 topic_ko(결정적
-    정렬). 레지스트리 미시드면 ``[]``(→ classify 는 분류 스킵·동작 보존).
+    Returns:
+        닫힌 대분류 라벨 전체(이름순 고정). catch-all 라벨은 빠진다. 레지스트리가 비어
+        있으면 빈 목록 — 그때는 분류 자체를 건너뛴다.
     """
     if not self_text or not str(self_text).strip():
         return []
     # 닫힌 대분류(parent NULL·taxonomy) 전체를 topic_ko 오름차순으로. '미분류'(catch-all)는 조회에서
-    # 배제(단일 출처 _UNCLASSIFIED_LABEL 파라미터 바인딩) — seed·058 은 불변, 065 분류 후보만 좁힌다.
+    # 배제한다(문자열은 한 곳에서만 관리). 시드 자체는 그대로 두고 **분류 후보만** 좁힌다.
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
@@ -143,19 +128,19 @@ def topic_candidates_for_self_text(
 
 
 def fetch_closed_subtopics(conn, topic_ko: str) -> list[str]:
-    """부모 topic 의 **닫힌 소분류(subtopic) 시드 목록**을 반환(068 G4·FR-203/205). 미시드면 ``[]``.
+    """부모 대분류 아래의 **닫힌 소분류 시드 목록**을 돌려준다. 시드가 없으면 빈 목록.
 
-    ``SELECT topic_ko FROM topic_registry WHERE parent_topic=%s AND source='taxonomy'
-    ORDER BY topic_ko`` — 부모 topic 스코프의 taxonomy 시드(닫힌 소분류)만 결정적 정렬로 회수한다.
+    **소분류도 만들어 내지 않고 고르게 한다.** 자유롭게 생성시켰더니 뜻이 겹치는 라벨이
+    난립하고 한 라벨이 절반 이상을 삼켰다 — 변별력이 사라진다. 대분류와 같은 방식으로
+    닫힌 목록에서 고르게 해 결정성과 변별력을 함께 얻는다.
 
-    **왜 닫힌 시드 선택인가(068 이슈3·비자명)**: 종전 §④ 는 058 ``canonicalize_subtopic``(열린 어휘
-    생성 + 부모 스코프 재사용)으로 subtopic 을 정했는데, 열린 생성이 과병합·과코스닝(여행>관광지 64%)을
-    낳았다. 068 은 subtopic 도 topic 처럼 부모의 **닫힌 시드**를 후보로 주고 LLM 이 그중 하나를 고르게
-    해(``_pick_subtopic_via_llm``) 결정성·변별력을 얻는다. subtopic 후보는 부모당 소수라 전부 프롬프트에
-    담을 수 있으므로 kNN 축소를 쓰지 않는다(topic 후보 전체-27 조회와 같은 결).
+    Args:
+        conn: DB 연결.
+        topic_ko: 이미 확정된 부모 대분류.
 
-    Consumes: ``topic_registry``(subtopic 층·부모 스코프·taxonomy). Produces: 닫힌 소분류 topic_ko
-    (결정적 정렬). 부모가 미시드면 ``[]``(→ classify 는 subtopic 미부여·강제 생성 금지).
+    Returns:
+        그 부모 아래 소분류 시드 전체(이름순 고정). **시드가 없으면 빈 목록**이고,
+        그때는 소분류를 붙이지 않는다(없는 라벨을 지어내지 않는다).
     """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -171,8 +156,8 @@ def fetch_closed_subtopics(conn, topic_ko: str) -> list[str]:
     return [str(r["topic_ko"]) for r in rows]
 
 
-# LLM 판정 프롬프트(FR-202·temp=0) — 자기 텍스트 + 후보 topic 목록 제시 → 닫힌 후보 중 하나 확정 +
-# 자산의 구체 subtopic 생성. 후보 밖 topic 을 지어내지 못하도록 규칙을 못박는다(FR-203·환각 차단).
+# 대분류 판정 프롬프트(온도 0) — 자기 텍스트와 후보 목록을 주고 그중 하나를 고르게 한다.
+# ⚠️ "목록에 없는 것을 지어내지 마라"를 규칙으로 못박는다 — 안 박으면 그럴듯한 라벨을 만들어 낸다.
 _CLASSIFY_PROMPT = """너는 자산의 자기 내용(요약·키워드·라벨)을 읽고 그 자산의 **대표 주제(topic)**를
 아래 "후보 주제 목록" 중 **정확히 하나**로 고르고, 자산의 구체적인 **하위주제(subtopic)**를 만드는
 분류기다.
@@ -195,18 +180,27 @@ _CLASSIFY_PROMPT = """너는 자산의 자기 내용(요약·키워드·라벨)�
 
 출력: {{"topic_ko":"...","topic_en":"...","subtopic_ko":"...","subtopic_en":"...","confidence":0.0}}"""
 
-# 재질의 경고(후보 밖 응답 1회 재시도·FR-203) — 원 프롬프트 뒤에 덧붙인다. none 도피처를 재질의에도
-# 유지해 "억지 최근접 배정"(강제 매핑)을 유발하지 않는다(FR-203·FR-702): 정말 안 맞으면 none 으로.
+# 후보 밖 답이 왔을 때 덧붙이는 경고. ⚠️ 재질의에도 **"해당 없음" 도피처를 남긴다** —
+# 없애면 LLM 이 억지로 가장 가까운 것을 골라 틀린 주제가 정본이 된다.
 _RETRY_SUFFIX = """
 
 경고: 직전 응답의 topic_ko 가 후보 목록에 없었다. 아래 후보 중 하나의 정확한 라벨만 고르되, 정말 어느 후보도 맞지 않으면 "none" 으로 답하라(억지로 고르지 마라): {candidates}"""
 
 
 def _pick_topic_via_llm(self_text: str, candidates: list[str], *, client) -> dict | None:
-    """닫힌 후보 중 topic 확정(LLM·temp=0). 후보 밖이면 1회 재질의, 재실패 시 None(FR-203).
+    """닫힌 후보 중 하나로 대분류를 확정한다(LLM 호출·온도 0).
 
-    반환은 LLM 응답 dict(``topic_ko`` 가 후보 내임이 검증된 상태) 또는 None. subtopic/en/confidence
-    는 호출부가 이 dict 에서 읽는다.
+    후보 밖 답이 오면 경고 문구를 붙여 **한 번만** 다시 묻는다. 재질의에도 "해당 없음"
+    도피처를 남긴다 — 없애면 LLM 이 억지로 가장 가까운 것을 골라 틀린 주제가 정본이 된다.
+
+    Args:
+        self_text: 자산 자기 텍스트.
+        candidates: 닫힌 후보 목록.
+        client: LLM 클라이언트. **주입할 수 있게 열어 둔 자리**라 네트워크 없이 검증된다.
+
+    Returns:
+        LLM 응답 dict(대분류가 후보 안임이 확인된 상태), 또는 두 번 다 실패하면 ``None``
+        (미부여). 소분류·영문·신뢰도는 호출부가 이 dict 에서 읽는다.
     """
     from src.llm.client import complete_json
 
@@ -226,15 +220,23 @@ def _pick_topic_via_llm(self_text: str, candidates: list[str], *, client) -> dic
 
 
 def _topic_in_candidates(out: dict, candidates: list[str]) -> bool:
-    """LLM 응답의 topic_ko 가 닫힌 후보 집합 안에 있는지(닫힌집합 검증·FR-203)."""
+    """LLM 응답의 대분류가 닫힌 후보 안에 있는지 확인한다.
+
+    Args:
+        out: LLM 응답. **dict 가 아닐 수도 있다**(형식 위반)— 그 경우도 거짓이다.
+        candidates: 닫힌 후보 목록.
+
+    Returns:
+        후보 안이면 참.
+    """
     topic_ko = out.get("topic_ko") if isinstance(out, dict) else None
     return isinstance(topic_ko, str) and topic_ko in candidates
 
 
-# 닫힌 subtopic 선택 프롬프트(068 G4·FR-203/205·temp=0) — 이미 확정된 부모 topic 을 명시하고 그 topic
+# 소분류 선택 프롬프트(온도 0) — 이미 확정된 부모 대분류를 명시하고 그 아래
 # 의 닫힌 소분류(subtopic) 시드 목록만 후보로 제시해 그중 정확히 하나를 고르게 한다. topic 선택
 # (_CLASSIFY_PROMPT)과 대칭이되 후보가 부모 스코프 시드 목록이라는 점만 다르다. 후보 밖 라벨을 지어내지
-# 못하도록 규칙을 못박고(FR-203·환각 차단), 어느 후보도 안 맞으면 none 도피처로 미부여시킨다(강제 매핑
+# 못하도록 규칙을 못박고, 어느 후보도 안 맞으면 "해당 없음"으로 미부여시킨다(강제 매핑
 # 금지). 여기서는 개체·고유명사 유도 문구가 불필요하다 — 후보 자체가 큐레이션된 재사용 카테고리다.
 _SUBTOPIC_PROMPT = """너는 자산의 자기 내용(요약·키워드·라벨)을 읽고, 이미 정해진 대표 주제(topic)
 "{topic_ko}" 아래의 **하위주제(subtopic)**를 아래 "후보 하위주제 목록" 중 **정확히 하나**로 고르는
@@ -256,7 +258,7 @@ _SUBTOPIC_PROMPT = """너는 자산의 자기 내용(요약·키워드·라벨)�
 
 출력: {{"subtopic_ko":"..."}}"""
 
-# subtopic 재질의 경고(후보 밖 응답 1회 재시도·FR-203/205) — 원 프롬프트 뒤에 덧붙인다. none 도피처를
+# 소분류 재질의 경고 — 원 프롬프트 뒤에 덧붙인다. "해당 없음" 도피처를
 # 재질의에도 유지해 "억지 최근접 배정"(강제 매핑)을 유발하지 않는다(정말 안 맞으면 none 으로).
 _SUBTOPIC_RETRY_SUFFIX = """
 
@@ -264,10 +266,15 @@ _SUBTOPIC_RETRY_SUFFIX = """
 
 
 def _subtopic_in_candidates(out: dict, candidates: list[str]) -> bool:
-    """LLM 응답의 subtopic_ko 가 닫힌 후보 집합 안에 있는지(닫힌집합 검증·FR-203/205).
+    """LLM 응답의 소분류가 닫힌 후보 안에 있는지 확인한다(대분류 쪽과 대칭·응답 키만 다르다).
 
-    ``_topic_in_candidates`` 와 대칭 — 다른 응답 키(``subtopic_ko``)를 검증한다. "none"/후보 밖/누락은
-    모두 False(→ 재질의·미부여 경로로 흘러 강제 매핑을 막는다).
+    Args:
+        out: LLM 응답.
+        candidates: 닫힌 후보 목록.
+
+    Returns:
+        후보 안이면 참. "해당 없음"·후보 밖·키 누락은 **모두 거짓**이라 재질의나 미부여
+        경로로 흘러, 억지 배정이 생기지 않는다.
     """
     sub = out.get("subtopic_ko") if isinstance(out, dict) else None
     return isinstance(sub, str) and sub in candidates
@@ -276,11 +283,16 @@ def _subtopic_in_candidates(out: dict, candidates: list[str]) -> bool:
 def _pick_subtopic_via_llm(
     self_text: str, topic_ko: str, candidates: list[str], *, client
 ) -> str | None:
-    """닫힌 subtopic 시드 후보 중 하나 선택(LLM·temp=0). 후보 밖이면 1회 재질의, 재실패/none → None.
+    """닫힌 시드 후보 중 하나로 소분류를 고른다(대분류 쪽과 같은 구조).
 
-    ``_pick_topic_via_llm`` 대칭 구조(부모 topic 명시 + 후보 목록 제시 → 후보 내 1개 또는 none). 반환은
-    선택된 subtopic_ko 문자열(후보 내임이 검증된 상태) 또는 None(미부여). 후보가 비면 호출부가 애초에
-    이 함수를 부르지 않는다(``fetch_closed_subtopics`` 빈 가드).
+    Args:
+        self_text: 자산 자기 텍스트.
+        topic_ko: 이미 확정된 부모 대분류. 프롬프트에 명시해 범위를 좁힌다.
+        candidates: 그 부모 아래 닫힌 시드. **비어 있으면 호출부가 애초에 부르지 않는다**.
+        client: LLM 클라이언트(주입 가능).
+
+    Returns:
+        고른 소분류 라벨, 또는 두 번 다 실패하거나 "해당 없음"이면 ``None``(미부여).
     """
     from src.llm.client import complete_json
 
@@ -304,8 +316,16 @@ def _pick_subtopic_via_llm(
 def _lookup_subtopic_en(conn, topic_ko: str, subtopic_ko: str) -> str | None:
     """부모 스코프 subtopic 의 정본 영문(``topic_registry.topic_en``·닫힌 시드 en). 없으면 None.
 
-    subtopic 층은 ``(parent_topic, topic_ko)`` 부분 유니크(v297)라 **부모 스코프로 조여** 조회한다 —
-    같은 subtopic_ko 가 다른 부모에 존재하는 동음이의를 오히트하지 않기 위함이다.
+    ⚠️ **부모까지 조건에 넣어야 한다** — 같은 이름의 소분류가 다른 부모 아래에도 있을 수
+    있어, 이름만으로 찾으면 엉뚱한 영문 라벨이 붙는다.
+
+    Args:
+        conn: DB 연결.
+        topic_ko: 부모 대분류.
+        subtopic_ko: 소분류 라벨.
+
+    Returns:
+        영문 라벨, 또는 없으면 ``None``.
     """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -322,9 +342,16 @@ def _lookup_subtopic_en(conn, topic_ko: str, subtopic_ko: str) -> str | None:
 def _load_self_meta(conn, asset_id) -> tuple[str | None, list | None, list | None]:
     """``asset_metadata.ext_meta`` 에서 summary/keywords/labels 로드(자기 텍스트 소스).
 
-    keywords 는 문자열 배열(jsonb), labels 는 ``[{label, score}]`` 객체 배열(jsonb·039/v298) →
-    psycopg 가 파이썬 list 로 디코드한다. 행이 없으면 (None, None, None).
+    Args:
+        conn: DB 연결.
+        asset_id: 대상 자산.
+
+    Returns:
+        ``(요약, 키워드, 라벨)``. **메타 행이 없으면 셋 다 ``None``** — 예외가 아니다
+        (아직 적재 중이거나 메타가 없는 자산은 정상 상태다).
     """
+    # ⚠️ ``->>`` 와 ``->`` 를 구분해 쓴다: 요약은 문자열로 꺼내고(``->>``), 키워드·라벨은
+    # JSON 배열째 꺼내야(``->``) 파이썬 list 로 디코드된다.
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
@@ -361,10 +388,21 @@ def _upsert_asset_topic(
     subtopic_en: str | None,
     confidence: float | None,
 ) -> None:
-    """``asset_topic`` 멱등 upsert(FR-202④) — ON CONFLICT(asset_id) DO UPDATE·updated_at·policy_version.
+    """자산 주제를 저장한다 — 자산당 한 행(다시 분류하면 덮어쓴다).
 
-    최초 insert 는 created_at 기본값(now())·updated_at NULL, 재분류(conflict) 시 updated_at=now() 로
-    갱신하고 policy_version 을 기록한다(재현성 추적·FR-601). decided_by 는 하이브리드 고정.
+    **DB에 쓴다.** 같은 자산을 다시 분류해도 행이 늘지 않고 덮어써진다.
+
+    분류 정책 버전을 함께 남긴다 — 프롬프트나 후보 구성이 바뀌었을 때 "이 결과가 어느
+    규칙으로 나온 것인지"를 되짚을 유일한 단서다.
+
+    Args:
+        conn: DB 연결.
+        asset_id: 대상 자산.
+        topic_ko: 확정된 대분류(필수).
+        topic_en: 대분류 영문. 레지스트리에 없으면 ``None``.
+        subtopic_ko: 소분류. 미부여면 ``None``.
+        subtopic_en: 소분류 영문. 미부여·미등록이면 ``None``.
+        confidence: LLM 이 준 신뢰도. 파싱 실패면 ``None``.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -398,12 +436,12 @@ def _upsert_asset_topic(
 def classify_asset_topic(
     conn, asset_id, *, self_text: str | None = None, settings=None, client=None
 ) -> dict | None:
-    """자산 자기주제 하이브리드 판정(닫힌 topic + 닫힌 subtopic 선택) + upsert(FR-202·068 G4). 미부여면 None.
+    """자산 주제를 판정해 저장한다 — 대분류·소분류 모두 닫힌 후보에서 고른다. 미부여면 None.
 
     반환 ``{topic_ko, topic_en, subtopic_ko, subtopic_en, confidence, decided_by:'hybrid'}`` 또는
     None(미부여·topic 미확정). 미부여 경로: 자기 텍스트 없음(LLM 미호출) · 전체-27 후보 없음(레지스트리
-    미시드) · 닫힌집합 검증 2회 실패(FR-203). subtopic 은 부모 시드 미존재/none 이면 None(topic 은 유지).
-    **예외는 삼키지 않고 올린다** — 호출부(run_ingest)가 registered 를 유지한 채 주제만 격리한다(FR-204).
+    미시드) · 후보 밖 답이 두 번 연속 온 경우. 소분류만 미부여면 대분류는 그대로 저장한다.
+    **예외는 삼키지 않고 올린다** — 호출부가 자산을 등록된 채 두고 주제만 미부여로 격리한다.
 
     Args:
         self_text: (선택) 이미 구성된 자기 텍스트. None 이면 ``asset_metadata`` 에서 로드해 구성한다.
@@ -417,7 +455,7 @@ def classify_asset_topic(
     if not self_text or not str(self_text).strip():
         return None
 
-    # ② topic 층 전체-27 후보(레지스트리 닫힌 대분류 전체·068 G1). 비면 미부여(레지스트리 미시드 가드).
+    # ② 닫힌 대분류 전체를 후보로. 비어 있으면 미부여(레지스트리가 시드되지 않은 상태).
     candidates = topic_candidates_for_self_text(conn, self_text, k=_DEFAULT_TOPIC_K)
     if not candidates:
         logger.info("자기주제 분류 스킵 — 전체-27 후보 없음(레지스트리 미시드): asset_id=%s", asset_id)
@@ -430,15 +468,15 @@ def classify_asset_topic(
         return None
 
     topic_ko = picked["topic_ko"]
-    # raw_sub(topic 콜이 곁들여 생성한 subtopic_ko)는 068 G4 이후 subtopic 결정에 쓰지 않는다 —
-    # subtopic 도 topic 처럼 부모의 닫힌 시드 목록에서 LLM 이 선택하기 때문(열린 어휘 생성 폐기). topic
+    # ⚠️ 대분류 판정이 곁들여 만들어 준 소분류는 **쓰지 않는다** —
+    # 소분류도 대분류처럼 부모의 닫힌 시드에서 고르게 한다(자유 생성은 라벨이 난립한다). 대분류
     # 콜의 subtopic 생성 지시(_CLASSIFY_PROMPT)는 무해하게 잔존하며 여기서 무시한다(제거는 후속 이연).
 
-    # ④ subtopic 을 부모 topic 의 **닫힌 시드 목록**에서 LLM 이 선택(068 G4·FR-203/205).
-    #    왜 canonicalize 우회인가(비자명): 058 canonicalize_subtopic 은 '열린 어휘 생성 + 부모 스코프
-    #    재사용'이라 과병합·과코스닝(여행>관광지 64%)을 낳았다. 068 은 topic 확정과 같은 결로 부모의 닫힌
+    # ④ 소분류를 부모 대분류의 **닫힌 시드 목록**에서 고른다.
+    #    왜 코어의 정규화 함수를 쓰지 않는가: 그쪽은 '어휘를 자유롭게 만들어 내고 부모 범위에서
+    #    재사용'하는 방식이라 뜻이 겹치는 라벨이 난립하고 한 라벨이 절반 이상을 삼켰다. 여기서는
     #    소분류 시드에서 고르게 해(fetch_closed_subtopics → _pick_subtopic_via_llm) 결정성·변별력을 얻는다.
-    #    058 함수 자체는 불변(관계 경로 graph_persist/backfill 이 strict 판정에 계속 씀) — classify 호출만 교체.
+    #    코어 함수 자체는 그대로 둔다 — 관계 경로가 계속 쓰고 있다.
     #    시드 미존재(subcands 빈)면 subtopic 미부여(None)·강제 생성 금지.
     subcands = fetch_closed_subtopics(conn, topic_ko)
     subtopic_ko = (
@@ -449,7 +487,7 @@ def classify_asset_topic(
     # subtopic_en 은 registry 정본(부모 스코프) 조회 — 닫힌 시드라 정본 en 이 존재. 미부여면 None.
     subtopic_en = _lookup_subtopic_en(conn, topic_ko, subtopic_ko) if subtopic_ko else None
 
-    # ⑤ topic_en 은 registry 정본 우선(FR-102 닫힌 어휘), 없으면 LLM 응답 값.
+    # ⑤ 영문 라벨은 레지스트리 정본을 먼저 쓰고, 없으면 LLM 응답 값으로 채운다.
     topic_en = _lookup_topic_en(conn, topic_ko) or picked.get("topic_en")
 
     confidence = _coerce_confidence(picked.get("confidence"))
@@ -470,5 +508,5 @@ def classify_asset_topic(
 
 
 # 자기주제 정본 **조회(read)**·주제 패싯·같은주제·미분류 함수(fetch_asset_topic·find_same_topic_groups·
-# list_topics·assets_in_topic·assets_unclassified)는 077 레포 분리에서 코어 ``src/topic/asset_topic_query.py``
+# list_topics·assets_in_topic·assets_unclassified)는 코어 ``src/topic/asset_topic_query.py``
 # 로 이관됐다(파이프라인=분류·write / 백엔드=read 런타임 소유 분리). 이 모듈은 classify·write 만 담는다.

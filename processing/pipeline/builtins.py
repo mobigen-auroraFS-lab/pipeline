@@ -1,11 +1,10 @@
 """v2 기본 전략을 DEFAULT_REGISTRY 에 등록(import 시 부수효과).
 
-**등록 패턴**: 이 모듈을 import 하는 순간 register_defaults(DEFAULT_REGISTRY) 가 실행된다.
-run_ingest/run_relations 진입부가 builtins 를 import 함으로써 레지스트리를 초기화한다.
-테스트에서는 별도 StrategyRegistry 에 register_defaults 를 호출해 격리할 수 있다.
+⚠️ **import 하는 것만으로 등록이 일어난다**(파일 맨 아래 한 줄). 실행 진입점이 이 모듈을
+가져오는 것으로 레지스트리가 채워지므로, 그 import 를 "안 쓰는 것 같다"고 지우면 팩이
+전략을 찾지 못해 터진다.
 
-태그 규약: 'onprem_llm'=온프레미스 LLM 사용, 'deterministic'=결정적.
-by_modality 는 외부 LLM 을 쓰지 않으므로 'external_llm' 태그가 없다(의료 정책 통과).
+테스트는 별도 레지스트리를 만들어 등록 함수를 직접 불러 격리할 수 있다.
 """
 from __future__ import annotations
 
@@ -26,32 +25,28 @@ from src.relations.llm_propose import propose_edges_json
 
 
 def _classify_cascade_v1(ctx: ExtractContext):
-    """ClassifyStage 어댑터 — cascade.classify(file_path, modality) 를 ctx 기반으로 감쌈.
+    """분류 슬롯 계약에 맞추는 얇은 어댑터 — 문맥에서 필요한 값만 꺼내 분류기에 넘긴다.
 
-    **교차 참조**: cascade.classify 는 도메인-불가지 cascade 엔진(processing/classify/domains/ 하위
-    DomainProfile 레지스트리 기반)으로, 새 도메인 추가 시 이 어댑터 코드는 수정하지 않아도 된다.
+    분류기 자체는 도메인을 모른다(도메인별 규칙은 그쪽 레지스트리에 있다). 그래서 새 도메인이
+    생겨도 이 어댑터는 그대로 둔다.
+
+    Args:
+        ctx: 처리 문맥. 파일 경로와 모달리티만 쓴다.
+
+    Returns:
+        분류 결과.
     """
     return cascade.classify(ctx.file_path, ctx.modality)
 
 
 def register_defaults(registry: StrategyRegistry) -> None:
-    """per-asset 및 cross-asset 기본 전략을 레지스트리에 등록한다.
+    """기본 전략을 레지스트리에 등록한다.
 
-    **per-asset 전략**:
-    - classify/cascade_v1  : 도메인-불가지 cascade 분류기(onprem_llm).
-    - extract/by_modality  : 모달리티(텍스트·이미지·영상·오디오)별 메타 추출(onprem_llm).
-    - embed/by_modality    : 모달리티별 임베딩(SentenceTransformer/CLIP; deterministic).
-    - persist/asset_upsert : asset + 관련 테이블 upsert(태그 없음 — DB IO 만).
+    태그가 정책 검사의 근거가 되므로 **등록할 때 정확히 붙여야 한다** — 외부 LLM 을 쓰는
+    전략에 그 태그를 빠뜨리면 의료 정책이 통과시켜 버린다.
 
-    **cross-asset 전략** (현재 run_relations 에서 슬롯별 resolve 하지 않고 묶음 위임):
-    - candidates/embedding_topk : 코사인 유사도 top-k 후보 선별(deterministic).
-    - score/llm_propose         : LLM JSON 엣지 생성(onprem_llm). propose_edges_json 으로 매핑.
-    - persist_edges/graph_upsert: graph_edge + 카탈로그 upsert.
-    - decide/confidence         : propose_relations_for_asset 내부 auto_approve 임계로 처리되므로
-                                  별도 Callable 미등록(슬롯 이름만 팩에 선언).
-
-    단계 D(3년차 이연·2026-07-06): 의료 전용 cross_asset 전략(예: blocking_5keys)이 추가될 때 이 함수에서 함께 등록한다.
-    그 시점에 run_relations 는 팩별 슬롯 resolve 로 전환해야 한다(현재 묶음 위임과의 전환점).
+    Args:
+        registry: 등록 대상. 보통 프로세스 전역 레지스트리이고, 테스트는 격리된 것을 준다.
     """
     # per-asset
     registry.register("classify", "cascade_v1", _classify_cascade_v1, tags={"onprem_llm"})
@@ -59,17 +54,16 @@ def register_defaults(registry: StrategyRegistry) -> None:
     registry.register("embed", "by_modality", dispatch_embed, tags={"deterministic"})
     registry.register("persist", "asset_upsert", finalize_asset)
 
-    # cross-asset(관계) 전략 — 팩 seam 의 resolve 대상으로 등록만 한다.
-    # 현재 run_relations 는 propose_relations_for_asset 로 묶음 위임하고, 슬롯별 개별 resolve 는
-    # 단계 D 의료 전략 분기에서 도입한다. 'decide'(confidence) 는 propose 내부 auto_approve 임계로 처리.
+    # 자산 사이 전략 — 지금은 일반 도메인 실행이 묶음 함수 하나에 위임돼 있어, 여기 등록된
+    # 것들은 배선표가 가리키는 대상으로만 쓰인다. 'decide' 는 임계 판정이 점수 쪽에 들어
+    # 있어 등록하지 않는다(팩에는 슬롯 이름만 있다).
     registry.register("candidates", "embedding_topk", find_embedding_candidates, tags={"deterministic"})
     registry.register("score", "llm_propose", propose_edges_json, tags={"onprem_llm"})
     registry.register("persist_edges", "graph_upsert", sync_graph_edges)
 
-    # 샘플 도메인 cross-asset 전략(spec 016) — 결정적·무LLM 데모. 008 슬롯 resolve seam +
-    # contracts.py cross_asset 계약 4종을 일반과 다른 전략으로 처음 배선해 제네릭 러너로 실행한다.
-    # persist_edges 의 등록명('sample_graph_upsert')과 함수명(sample_persist_edges)이 다른 점 주의 —
-    # 팩의 슬롯명(SAMPLE_PACK.cross_asset['persist_edges']='sample_graph_upsert')과 일치시킨 것이다.
+    # 샘플 도메인 — 조합형 구조가 도는지 보여 주는 데모(결정적·LLM 미사용).
+    # ⚠️ 저장 전략은 **등록명과 함수명이 다르다**. 배선표에 적힌 이름에 맞춘 것이라, 함수명을
+    #    보고 등록명을 고치면 팩이 전략을 못 찾는다.
     registry.register("candidates", "sample_candidates", sample_candidates, tags={"deterministic"})
     registry.register("score", "sample_score", sample_score, tags={"deterministic"})
     registry.register("decide", "sample_decide", sample_decide, tags={"deterministic"})

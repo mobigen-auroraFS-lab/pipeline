@@ -40,8 +40,8 @@ def _extract_video_meta(ctx: ExtractContext) -> AssetRecord:
     cfg = ctx.settings or get_current_settings()
     file = ctx.file_path
 
-    # 048: 키프레임 추출 직후·VLM 루프 이전 near-dup 제거(설정 단일 출처 주입).
-    # enabled=False 면 extract 가 현행 경로 그대로 → 결과 바이트 동일(FR-103).
+    # 키프레임을 뽑은 직후·무거운 모델 루프 **전에** 중복을 없앤다(설정은 한 곳에서 주입).
+    # 꺼져 있으면 추출이 기존 경로를 그대로 타 결과가 달라지지 않는다.
     dedup_config = KeyframeDedupConfig(
         enabled=cfg.video.dedup_enabled,
         hash_max=cfg.video.dedup_hash_max,
@@ -54,10 +54,10 @@ def _extract_video_meta(ctx: ExtractContext) -> AssetRecord:
     frame_items = extract_video_representative_frame_bytes(
         video_path=file, max_frames=cfg.video.max_keyframes, dedup=dedup_config
     )
-    # 069 B9(P2-10): 키프레임 0장 관측만(현행 동작 유지 — failed 전환·zero-vector 통일 금지).
+    # 키프레임 0장을 **관측만** 한다 — 실패로 뒤집거나 빈 벡터로 메우지 않는다.
     # 코덱 미지원·손상 등으로 대표 프레임을 못 뽑으면 이 영상은 시각 임베딩·키프레임 라벨이 비어
-    # 검색에서 사실상 누락되는데, 지금까지 조용했다. 근본 처방(ffmpeg 폴백)은 064 몫이고 여기선
-    # 관측 공백만 메운다 — 상태·임베딩 계약은 그대로 두어 US-B "국소" 원칙을 지킨다.
+    # 검색에서 사실상 누락되는데 아무 신호가 없었다. 근본 처방(변환 폴백)은 추출 쪽 몫이고 여기선
+    # 관측 공백만 메운다 — 상태·임베딩 계약은 건드리지 않는다.
     if not frame_items:
         _LOG.warning("키프레임 0장 — 시각 임베딩·라벨 없이 진행(현행 유지·관측): video=%s", file)
     korean_labels_per_frame: list[list[str]] = []
@@ -118,13 +118,21 @@ def _extract_video_meta(ctx: ExtractContext) -> AssetRecord:
 
 
 def _embed_video(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
-    """키프레임별 임베딩을 생성해 반환한다 — 기본 ST/CLIP 쌍, 063 ``embed_enable_clip=False`` 시 ST만.
+    """키프레임별 임베딩을 만든다 — 기본은 텍스트·시각 쌍, 시각 채널을 끄면 텍스트만.
 
-    키프레임 n 개 → EmbeddingItem 2n 개(ST·CLIP 쌍; clip off 시 n 개=ST만). chunk_index 는 키프레임 순번(0-based).
-    같은 chunk_index 를 공유하는 ST/CLIP 쌍이 하이브리드 검색에서 동일 시점 프레임을 나타낸다.
-    텍스트 채널·모델은 활성 임베딩 프로파일(018)로 결정한다(기본 active='st'·KoSimCSE → 회귀 0).
-    CLIP 벡터는 ctx.scratch["keyframes"] 에서 꺼내므로 CLIP 추론을 재실행하지 않는다(시각 채널은 무변경).
-    계약 위반(extract 없이 단독 호출) 시 RuntimeError 로 즉시 탐지된다.
+    키프레임 하나가 **항목 두 개**(글로 옮긴 텍스트 벡터 + 시각 벡터)를 낸다. 둘은 같은
+    순번을 공유하므로, 검색에서 어느 쪽이 걸려도 **같은 시점의 프레임**을 가리킨다.
+
+    Args:
+        ctx: 처리 문맥. ⚠️ **추출 단계가 남긴 키프레임이 실려 있어야 한다** — 시각 모델을
+            다시 돌리지 않기 위해 넘겨받는 구조이고, 없으면 예외로 즉시 알린다.
+        rec: 추출 레코드. 이 함수는 키프레임 쪽 메타를 쓴다.
+
+    Returns:
+        임베딩 항목. 시각 채널을 끄면 키프레임당 하나(텍스트만)가 된다.
+
+    Raises:
+        RuntimeError: 같은 문맥으로 추출을 먼저 돌리지 않았을 때.
     """
     from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME
     from src.embedders.text_embedder import embed_texts_for, pad_embedding_to_storage_dim
@@ -143,7 +151,7 @@ def _embed_video(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         chunk_content = build_image_vlm_text_for_embedding(frame_meta)
         if not chunk_content.strip():
             chunk_content = " "
-        # 062: 키프레임 VLM 캡션 ST 임베딩도 채널 백엔드(로컬/API)로 라우팅(적재=질의 정합·st_api).
+        # 캡션 임베딩도 채널이 정한 백엔드로 보낸다 — 적재와 질의가 같은 모델을 써야 한다.
         st_raw = embed_texts_for(
             [chunk_content],
             channel=channel,
@@ -153,7 +161,7 @@ def _embed_video(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         st_vec = pad_embedding_to_storage_dim(st_raw)
         # 키프레임당 ST(+CLIP) 항목(같은 chunk_index, 채널로 구분)
         embeddings.append(EmbeddingItem(channel=channel, vector=st_vec, model_name=model, chunk_index=i))
-        # 063: clip 임베딩 토글(기본 True=기존 동치). off면 키프레임 clip 항목만 스킵.
+        # 시각 채널 토글. 끄면 키프레임의 시각 항목만 빠진다.
         if cfg.embed.enable_clip:
             embeddings.append(EmbeddingItem(
                 channel=_CHANNEL_CLIP, vector=kf["clip_vec"],

@@ -2,7 +2,7 @@
 
 ``asset_classification`` 적재 + ``asset.domain_label``/``domain_confidence`` 갱신.
 final_label == 'review' 는 별도 큐 없이 ``asset.domain_label='review'`` 표식만 남긴다
-(unresolved_pool 테이블은 드롭됨 — HITL 큐는 단계 D에서 결정, spec 003 FR-013).
+(검토 대기 큐 테이블은 없다 — 사람 검토 흐름은 아직 정하지 않았다).
 psycopg ``Connection`` 을 받아 오케스트레이터 트랜잭션에서 조합한다.
 """
 
@@ -50,7 +50,7 @@ def record_classification(conn: Connection[Any], asset_id: uuid.UUID, result: Cl
             ),
         )
         # asset 테이블도 동기화 — run_ingest 가 domain_label 로 팩 선택·deferred 판별.
-        # 'review' 판정도 이 표식이 전부다(드롭된 unresolved_pool 에 INSERT 금지 — FR-013).
+        # ⚠️ '검토 필요' 판정도 이 표식이 전부다 — 존재하지 않는 큐 테이블에 넣으려 하면 안 된다.
         cur.execute(
             "UPDATE asset SET domain_label = %s, domain_confidence = %s, updated_at = now() WHERE asset_id = %s",
             (result.final_label, result.confidence, asset_id),

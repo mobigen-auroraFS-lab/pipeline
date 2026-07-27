@@ -1,35 +1,27 @@
-"""030 G2 — Airflow DAG 가 호출하는 PG 상태 기반 배치 로직(순수 함수).
+"""주기 배치가 DB 상태를 훑어 미완분을 전진시키는 엔진(스케줄러 비의존·순수 함수).
 
-큐·브로커·장수명 워커 없이 **주기 배치가 PostgreSQL 상태를 스캔해 미완분을 전진**시키는 엔진의
-코어 로직이다(spec 030, ADR 2026-06-16). Airflow DAG 태스크는 이 함수들을 호출하는 얇은 래퍼이며
-(FR-011), 본 모듈은 **Airflow 를 import 하지 않아** Airflow 없이 단위 테스트·CLI 디버그가 가능하다.
+**흐름에서의 위치**: 스케줄러의 태스크는 이 함수들을 부르는 얇은 껍데기다. 이 모듈은
+**스케줄러를 import 하지 않는다** — 그래야 스케줄러 없이 단위 테스트와 CLI 디버그가 된다.
 
-상태 정본(신규 큐 테이블 0 — SC-011):
-    · ``asset.status``       — 수집 FSM(009 조건부 UPDATE 원자성). received→…→registered/failed/deferred.
-    · ``relation_resolution`` — 관계 단계(v250). dag_relations 가 미해소 자산을 집어 전진.
-    · ``asset_lineage``       — append-only 활동 로그. ``ingest.failed.v1`` 수가 재시도 cap 의 소스.
+큐도 브로커도 장수명 워커도 두지 않는다. **상태는 전부 DB 에 있다**: 자산의 처리 단계,
+관계 해소 여부, 그리고 무슨 일이 있었는지를 덧붙이기만 하는 활동 기록. 배치는 그것을
+훑어 다음으로 밀 뿐이다.
 
-핵심 설계 불변식(★ 이대로 — 어기면 미묘한 버그)
-    1. **원자 claim = ``process_asset`` 의 첫 조건부 전이**다. received 자산은 process_asset 가
-       ``set_status(received→routing)``(009 조건부 UPDATE)로 시작하므로 그 자체가 원자 점유다.
-       ``process_received_batch`` 는 received 자산마다 process_asset 를 호출하고, **첫 전이가 0행
-       (InvalidTransitionError 계열 — 이미 누가 점유했거나 received 가 아님)이면 그 자산을 스킵**한다.
-       별도의 충돌하는 claim UPDATE 를 두지 않는다(두면 process_asset 첫 전이가 깨진다).
-    2. **고착(crash) 자산 = received 리셋 후 재처리**. 비종료(routing/classifying/extracting)로
-       임계시간 넘게 고착된 자산은 ``claim_asset(expected=<고착상태>, next='received')`` 조건부 UPDATE 로
-       received 로 되돌린 뒤 다음 처리에서 재처리한다(재추출은 결정적·해시 dedup 이 중복 흡수).
-       resumable process_asset(복잡)보다 이 리셋(단순·멱등)을 택한다. **단, 리셋도 재시도 cap 대상이다**
-       (``ingest.reset.v1`` 기록·실패 수와 합산): 하드 크래시로 예외 핸들러(#3)가 못 도는 자산이 무한
-       리셋·재처리하며 배치 선두를 점유(head-of-line 정체)하지 않도록, 누적 복구 시도가 cap 이상이면
-       received 대신 ``failed`` 로 격리한다.
-    3. **재시도 cap**: 자산 처리 중 예외를 잡으면 ``ingest.failed.v1`` lineage 기록 +
-       ``failure_count`` ≥ N 이면 ``mark_failed``(종료 격리), 미만이면 비종료로 두어 다음 run 고착스캔이
-       received 로 리셋·재처리한다. 한 자산 예외가 배치 루프를 멈추지 않는다(자산별 try).
-    4. **종료 계열(registered/failed/deferred)** 은 received/고착 스캔 대상에서 제외. deferred 는
-       재시도가 아니라 계획적 대기(단계 D 의료 어댑터 대기)이므로 dag_process 재스캔 대상이 아니다.
+지켜야 할 규칙 넷 — 어기면 조용히 어긋난다
+    1. **점유는 첫 상태 전이가 대신한다.** 처리 함수의 첫 조건부 UPDATE 가 곧 원자 점유이므로,
+       별도의 점유 UPDATE 를 두면 안 된다 — 두는 순간 그 첫 전이가 항상 0행이 되어 깨진다.
+       첫 전이가 0행이면 남이 이미 집어 간 것이므로 **스킵**이지 실패가 아니다.
+    2. **멈춰 있는 자산은 처음으로 되돌려 다시 돌린다.** 중간 단계에서 오래 머문 자산은
+       조건부 UPDATE 로 처음 상태로 되돌린다. 중단 지점부터 이어 하는 편이 똑똑해 보이지만
+       훨씬 복잡하고, 재추출은 결정적이라 다시 해도 결과가 같다.
+    3. **되돌리기도 횟수를 센다.** 프로세스가 통째로 죽으면 실패 처리기가 돌지 못해 실패
+       기록이 남지 않는다. 그러면 같은 자산이 영원히 되돌려지며 **배치 선두를 막는다**.
+       그래서 되돌릴 때도 기록을 남기고, 실패 수와 합산해 한계에 닿으면 실패로 격리한다.
+    4. **끝난 자산은 다시 보지 않는다.** 특히 '보류'는 실패가 아니라 계획된 대기이므로
+       재시도 대상이 아니다 — 여기 넣으면 영원히 재시도한다.
 
-모든 함수는 ``conn``/``db`` 주입 seam — 트랜잭션 경계는 호출자가 제어하거나(스캔/claim) batch 내부가
-짧은 트랜잭션으로 제어한다(process_received_batch). 결정성·온프레미스 LLM·PHI 비식별(헌법 3·2·10조).
+트랜잭션 경계는 호출자(스캔·점유)나 배치 내부(짧게 여러 번)가 잡는다. 실패 사유는 **예외
+타입명만** 남긴다 — 메시지·경로에는 민감정보가 섞일 수 있다(헌법 10조).
 """
 
 from __future__ import annotations
@@ -64,7 +56,14 @@ _NON_TERMINAL = (AssetStatus.ROUTING, AssetStatus.CLASSIFYING, AssetStatus.EXTRA
 
 
 def _status_value(status: AssetStatus | str) -> str:
-    """AssetStatus enum 이든 문자열이든 DB 비교용 값 문자열로 정규화."""
+    """열거형이든 문자열이든 DB 비교에 쓸 문자열로 맞춘다.
+
+    Args:
+        status: 상태값. 호출부마다 열거형·문자열이 섞여 들어온다.
+
+    Returns:
+        DB 에 저장된 것과 같은 형태의 문자열.
+    """
     return status.value if isinstance(status, AssetStatus) else status
 
 
@@ -74,10 +73,16 @@ def _status_value(status: AssetStatus | str) -> str:
 def scan_received_assets(conn: Connection[Any], *, limit: int) -> list[tuple[uuid.UUID, str]]:
     """``received`` 자산을 생성순으로 ``limit`` 개 집어 ``(asset_id, fs_path)`` 목록 반환.
 
-    dag_process 가 처리할 대상이다. modality 는 호출자(process_received_batch)가 ``route_file`` 로
-    재탐지한다(모델 0·결정적). 정렬은 created_at ASC, asset_id ASC — 먼저 들어온 파일을 먼저 처리(FIFO)
-    하되 동일 created_at·대상>limit 면 asset_id(UUIDv7) 보조 정렬로 경계를 결정적으로 고정한다
-    (헌법 3조·FR-012, 형제 scan_unresolved_assets 와 동형).
+    먼저 들어온 것을 먼저 처리하되, 생성 시각이 같으면 자산 id 로 갈라 **자르는 경계를
+    고정한다** — 안 그러면 대상이 상한을 넘을 때 매번 다른 묶음이 잡힌다(헌법 3조).
+
+    Args:
+        conn: DB 연결.
+        limit: 한 번에 집을 최대 건수.
+
+    Returns:
+        ``(asset_id, 파일 경로)`` 목록. 모달리티는 담지 않는다 — 호출자가 경로로 다시
+        판정한다(모델을 쓰지 않는 결정적 판정이라 저장값에 기댈 이유가 없다).
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -93,12 +98,18 @@ def scan_stuck_assets(
 ) -> list[tuple[uuid.UUID, str]]:
     """비종료(routing/classifying/extracting)로 ``older_than_s`` 초 넘게 고착된 자산 목록.
 
-    이전 run 크래시로 비종료에 멈춘 자산을 ``(asset_id, status)`` 로 돌려준다 — 호출자가
-    ``claim_asset(expected=status, next='received')`` 로 received 리셋해 재처리한다(self-healing,
-    불변식 #2). 종료 계열(registered/failed/deferred)은 IN 목록에서 빠져 재스캔되지 않는다(불변식 #4).
-    ``updated_at`` 이 NULL 이면(전이 전) 비교가 거짓이라 자연 제외된다(received 는 애초에 대상 아님).
-    정렬은 updated_at ASC, asset_id ASC — 동일 updated_at·대상>limit 시 asset_id(UUIDv7) 보조 정렬로
-    경계를 결정적으로 고정한다(헌법 3조·FR-012).
+    이전 실행이 죽어 중간 단계에 멈춘 자산을 찾는다. 호출자가 이것을 처음 상태로 되돌려
+    다시 돌린다(규칙 #2).
+
+    Args:
+        conn: DB 연결.
+        older_than_s: 이 시간(초)보다 오래 멈춘 것만. **너무 짧게 주면 정상 처리 중인
+            자산을 빼앗는다** — 한 자산 처리에 걸리는 최대 시간보다 넉넉해야 한다.
+        limit: 한 번에 집을 최대 건수.
+
+    Returns:
+        ``(asset_id, 멈춘 상태)`` 목록. 되돌릴 때 그 상태를 조건으로 걸어야 하므로 함께
+        돌려준다. 끝난 자산은 애초에 조회 대상이 아니다(규칙 #4).
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -114,9 +125,15 @@ def scan_stuck_assets(
 def scan_unresolved_assets(conn: Connection[Any], *, limit: int) -> list[uuid.UUID]:
     """``registered`` 인데 ``relation_resolution`` 미해소(행 없음 또는 ``pending``)인 자산 목록.
 
-    dag_relations 가 ``propose_relations_for_asset`` 으로 관계를 만들 대상이다. LEFT JOIN 으로
-    큐 행 없음(asset_id IS NULL)·pending 만 고르고 resolved/failed(DLQ)는 자연 제외한다(FR-004).
-    정렬은 created_at ASC, asset_id ASC — 결정적 tiebreaker(헌법 3조).
+    ⚠️ **아직 시도조차 안 한 자산과 시도 중인 자산을 함께** 집는다 — 관계 단계는 행이
+    없는 상태로 시작하므로, 있는 행만 보면 새 자산이 영원히 빠진다.
+
+    Args:
+        conn: DB 연결.
+        limit: 한 번에 집을 최대 건수.
+
+    Returns:
+        자산 id 목록(생성순·동시각은 id 순으로 고정). 이미 끝났거나 포기한 자산은 빠진다.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -142,12 +159,20 @@ def claim_asset(
 ) -> bool:
     """조건부 ``UPDATE asset SET status=next WHERE asset_id=%s AND status=expected`` → 점유 성공 여부.
 
-    원자 점유·고착 리셋 프리미티브(009 조건부 UPDATE 원자성). 기대 현재상태(expected)가 그사이
-    바뀌면 0행이 되어 ``False`` 를 돌려준다(lost update 거부) — 동시 2회 중 1회만 ``True``.
+    현재 상태를 조건에 걸어 갱신하므로, 그사이 남이 바꿨으면 0행이 되어 ``False`` 다.
+    동시에 둘이 시도해도 **한쪽만 참**을 받는다.
 
-    ⚠️ ``set_status`` 와 달리 **FSM 검증(ALLOWED_TRANSITIONS)을 거치지 않는다** — 고착 리셋
-    (routing→received 등)은 정상 FSM 전이가 아닌 *복구 리셋*이라 의도적으로 검증을 우회한다(불변식 #2).
-    DB CHECK 제약은 그대로 적용되므로 받은 상태값은 유효해야 한다. status_reason 은 건드리지 않는다.
+    ⚠️ **정상 전이 규칙을 검사하지 않는다.** 되돌리기는 정상 흐름이 아니라 *복구*라
+    일부러 우회한다 — 대신 아무 값이나 넣으면 DB 제약에 걸리므로 유효한 상태를 줘야 한다.
+
+    Args:
+        conn: DB 연결.
+        asset_id: 대상 자산.
+        expected: **지금 이 상태일 때만** 바꾼다. 이 조건이 곧 원자 점유다.
+        next: 바꿀 상태.
+
+    Returns:
+        실제로 바꿨으면 ``True``. 사유 컬럼은 건드리지 않는다.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -164,8 +189,15 @@ def claim_asset(
 def failure_count(conn: Connection[Any], asset_id: uuid.UUID) -> int:
     """그 자산의 ``ingest.failed.v1`` lineage 누적 수(재시도 cap 의 소스, 불변식 #3).
 
-    같은 트랜잭션 안에서 방금 INSERT 한 실패 lineage 도 함께 센다(자기 트랜잭션 가시성) — 따라서
-    N번째 실패에서 count==N 이 되어 cap(≥N) 판정이 그 자리에서 성립한다. run 을 가로질러 누적된다.
+    **방금 같은 트랜잭션에서 남긴 실패도 함께 센다** — 그래야 N번째 실패에서 바로 한계
+    판정이 선다(다음 실행까지 기다리지 않는다). 실행을 가로질러 누적된다.
+
+    Args:
+        conn: DB 연결.
+        asset_id: 대상 자산.
+
+    Returns:
+        누적 실패 횟수.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -178,9 +210,16 @@ def failure_count(conn: Connection[Any], asset_id: uuid.UUID) -> int:
 def recovery_attempt_count(conn: Connection[Any], asset_id: uuid.UUID) -> int:
     """복구 시도 누적 = ``ingest.failed.v1``(잡힌 예외) + ``ingest.reset.v1``(고착 리셋).
 
-    소프트 실패는 ``_handle_failure`` 가 세지만, 하드 크래시(프로세스 사망)는 핸들러가 못 돌아
-    실패 lineage 가 안 남는다 — 대신 다음 run 고착 리셋이 ``ingest.reset.v1`` 을 남기므로, 둘을
-    합산한 값이 크래시 루프까지 포함한 실질 재시도 횟수다(``reset_stuck_assets`` 의 cap 소스).
+    잡히는 실패는 실패 처리기가 세지만, **프로세스가 통째로 죽으면 그 처리기가 못 돈다** —
+    그런 자산은 실패 기록이 없어 영원히 재시도된다. 되돌리기 기록까지 합산해야 그 경우가
+    잡힌다.
+
+    Args:
+        conn: DB 연결.
+        asset_id: 대상 자산.
+
+    Returns:
+        실패 + 되돌리기 누적 횟수.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -219,15 +258,22 @@ def reset_stuck_assets(
 ) -> tuple[list[uuid.UUID], list[uuid.UUID]]:
     """고착(crash) 자산을 received 로 리셋(self-healing, 불변식 #2) — 단, 크래시 루프는 cap 으로 차단.
 
-    ``(reset, isolated)`` 반환: received 로 되돌린 목록과, 리셋 cap 도달로 ``failed`` 종료 격리한 목록.
-    한 트랜잭션에서 고착 스캔 + (cap 판정) + 조건부 claim/격리를 수행한다.
+    **DB 에 쓴다.** 되돌리기·격리·기록을 한 트랜잭션에서 처리한다.
 
-    **크래시 루프 cap(불변식 #3 확장).** 하드 크래시(OOM-kill/SIGKILL/네이티브 segfault)는
-    ``_handle_failure`` 가 못 돌아 실패 lineage·cap 이 안 걸리고, 리셋된 자산은 created_at 이 오래돼
-    다음 배치 선두에서 또 처리되다 또 크래시 — 무한 루프 + head-of-line 정체가 된다. 이를 막으려
-    리셋마다 ``ingest.reset.v1`` lineage 를 남기고, 누적 복구 시도(실패+리셋, ``recovery_attempt_count``)
-    가 ``max_failures`` 이상이면 received 리셋 대신 ``mark_failed`` 로 종료 격리한다. cap 카운트는 리셋
-    기록 **전에** 세므로(이전 시도만 반영) N회 시도 후 격리된다. mark_failed 충돌(이미 종료)은 흡수한다.
+    ⚠️ **되돌리기에도 한계를 둔다.** 프로세스가 통째로 죽는 자산은 실패 기록이 안 남아
+    한계에 걸리지 않고, 오래된 자산이라 다음 배치에서도 맨 앞에 온다 — 그대로 두면 같은
+    자산이 영원히 배치를 막는다. 그래서 되돌릴 때마다 기록을 남기고, 누적 시도가 한계에
+    닿으면 되돌리는 대신 실패로 격리한다. 한계 판정은 **이번 기록을 남기기 전에** 세므로
+    정확히 N번 시도한 뒤 격리된다.
+
+    Args:
+        db: 트랜잭션을 열 수 있는 DB 핸들.
+        older_than_s: 이 시간보다 오래 멈춘 것만 대상으로.
+        limit: 한 번에 다룰 최대 건수.
+        max_failures: 누적 시도가 이 값 이상이면 되돌리지 않고 격리한다.
+
+    Returns:
+        ``(되돌린 목록, 격리한 목록)``. 그사이 다른 경로가 이미 끝낸 자산은 조용히 넘어간다.
     """
     reset: list[uuid.UUID] = []
     isolated: list[uuid.UUID] = []
@@ -267,9 +313,19 @@ def _handle_failure(
 ) -> None:
     """자산 처리 실패를 cap 정책으로 처리(불변식 #3) — 비식별 사유 lineage + cap 도달 시 종료 격리.
 
-    fresh 트랜잭션으로 ``ingest.failed.v1`` lineage(사유=예외 **타입명**만, 헌법 10조 PHI 비식별)를
-    기록하고, 누적 실패 수가 ``max_failures`` 이상이면 ``mark_failed``(종료 격리)·미만이면 비종료로
-    둔다(다음 run 재시도). mark_failed 충돌(이미 종료 상태)은 흡수한다(배치 무중단).
+    **DB에 쓴다** — 실패 트랜잭션과 분리된 새 트랜잭션으로 기록한다(실패 때문에 롤백된
+    트랜잭션에 기록하면 그 기록도 함께 사라진다).
+
+    ⚠️ 사유는 **예외 타입명만** 남긴다 — 예외 메시지와 경로에는 민감정보가 섞일 수 있고,
+    활동 기록은 지우지 않는 테이블이다(헌법 10조).
+
+    Args:
+        db: 트랜잭션을 열 수 있는 DB 핸들.
+        asset_id: 실패한 자산.
+        exc: 잡은 예외. **타입명만 쓰고 내용은 버린다**.
+        max_failures: 누적 실패가 이 값 이상이면 실패로 격리하고, 미만이면 그대로 둬
+            다음 실행이 되돌려 재시도하게 한다.
+        report: 집계 대상. 이 함수가 **여기에 결과를 담는다**(반환값이 아니라 인자를 채운다).
     """
     reason = type(exc).__name__  # 예외 타입명만 — 메시지·경로(PHI 가능)를 lineage 에 담지 않는다.
     _LOG.warning("처리 실패: asset_id=%s (%s)", asset_id, reason)
@@ -304,23 +360,33 @@ def process_received_batch(
 ) -> BatchReport:
     """received(+옵션 고착 리셋) 자산을 **단일 프로세스에서 모델 1회 로드·순차** 처리한다(불변식 #1·#3).
 
-    한 run = 한 프로세스(dag_process ``max_active_runs=1``/Pool 1)이므로 인프로세스 모델(ST·CLIP·
-    faster-whisper)은 기존 ``lru_cache`` 가 프로세스 수명 동안 1회만 로드해 배치 전체에서 재사용한다
-    (자산마다 재로드 0 — SC-003). LLM 은 기존 외부 HTTP seam.
+    **한 번에 하나씩 순차로** 돈다. 병렬로 돌리지 않는 이유는 임베딩 모델이 프로세스마다
+    수 GB 를 잡아먹기 때문이다 — 한 프로세스로 묶으면 모델을 **한 번만 올려** 배치 전체에서
+    재사용한다.
 
-    흐름:
-      1. ``older_than_s`` 주어지면 고착 자산을 received 로 리셋(self-healing, 불변식 #2).
-      2. received 자산을 ``limit`` 개 스캔.
-      3. 자산마다 ``route_file`` 재탐지(modality·domain) 후 ``process_asset`` 순차 호출.
-         · 정상 → registered/deferred 집계.
-         · 첫 전이 0행(InvalidTransitionError 계열) → **스킵**(경쟁 점유 흡수, cap 미카운트, 불변식 #1).
-         · 그 외 예외 → ``_handle_failure``(cap·종료 격리, 불변식 #3). **한 자산 실패가 배치를 멈추지
-           않는다**(자산별 try).
+    흐름: (선택) 멈춘 자산 되돌리기 → 대기 자산 스캔 → 자산마다 경로 재판정 후 처리.
+
+    **한 자산의 실패가 배치를 멈추지 않는다** — 자산마다 따로 감싼다. 다른 실행이 이미
+    집어 간 자산은 실패가 아니라 스킵으로 세고 재시도 횟수에 넣지 않는다.
+
+    Args:
+        db: 트랜잭션을 열 수 있는 DB 핸들.
+        limit: 한 번에 처리할 최대 자산 수.
+        max_failures: 누적 실패·되돌리기가 이 값 이상이면 실패로 격리한다.
+        older_than_s: 주면 멈춘 자산 되돌리기를 **먼저** 한 번 돈다. ``None`` 이면 건너뛴다.
+        extract_fn: 추출 단계를 갈아끼울 때만. 미주입이면 팩이 고른 전략을 쓴다.
+        classify_fn: 분류 단계를 갈아끼울 때만. 미주입이면 팩이 고른 전략을 쓴다.
+        registry: 전략을 찾을 레지스트리. 테스트가 격리된 것을 줄 수 있다.
+        settings: 설정. **미주입이면 현재 활성 설정으로 채운다** — 비워 두면 색인 설정을
+            못 읽어 색인이 조용히 꺼진다.
+        os_index: 색인 함수. 미주입이면 배치당 하나를 만들어 전체에서 재사용한다.
+
+    Returns:
+        자산별 처리 결과 집계.
     """
-    # 069 B8(P2-9): settings 미주입 시 현재 설정으로 폴백(CLI run_ingest L329 동형). 미폴백이면
-    # _make_opensearch_indexer 에 None 이 넘어가 opensearch_sync_enabled 를 못 읽고 OS 색인이
-    # 조용히 off 된다. get_current_settings 는 운영 진입점(init_settings)에서 활성 — 순수 단위는
-    # 호출자가 settings 를 주입하므로 이 폴백 경로를 타지 않는다(지연 import 로 미초기화 오염 방지).
+    # ⚠️ 설정을 안 받으면 색인 설정을 못 읽어 **색인이 말없이 꺼진다** — 현재 활성 설정으로
+    # 메운다. 순수 단위 테스트는 항상 설정을 주입하므로 이 경로를 타지 않고, 지연 import 라
+    # 설정 미초기화 환경을 오염시키지도 않는다.
     if settings is None:
         from src.config.settings import get_current_settings
 
@@ -328,10 +394,8 @@ def process_received_batch(
 
     report = BatchReport()
 
-    # OpenSearch 증분 색인기 — os_index 미주입 시 배치당 1회 생성(run_ingest CLI 동형, FR-002·US1§2).
-    # opensearch_sync_enabled off(기본)면 콜러블이 즉시 반환하므로 미도입 환경에서 무해(회귀 0). 클라이언트는
-    # 첫 색인에서 만들어 배치 전체 재사용(자산마다 새 연결 X). process_asset 의 finalize 직후 os_index(asset_id)
-    # 로 호출된다. 호출자가 os_index 를 직접 주입하면 새로 만들지 않고 그대로 쓴다(중복 생성 회피).
+    # 색인기는 **배치당 하나**만 만든다 — 자산마다 만들면 검색 엔진 연결이 그만큼 열린다.
+    # 색인이 꺼져 있으면 이 콜러블은 즉시 반환하므로 검색 엔진 없는 환경에서도 무해하다.
     if os_index is None:
         os_index = _make_opensearch_indexer(db=db, settings=settings)
 

@@ -73,12 +73,21 @@ class ConcurrentTransitionError(InvalidTransitionError):
     ``InvalidTransitionError`` 를 상속한다(의도적): run_ingest 의 fresh 트랜잭션
     실패-기록 격리부가 이미 ``except InvalidTransitionError`` 로 종료 상태 전이를 흡수하므로,
     충돌도 같은 경로로 자연 흡수되어 배치가 멈추지 않는다(헌법 8조 — 호출부 시그니처 무변경).
-    단일 워커 순차 경로에서는 발생하지 않으므로 회귀 0.
+    한 번에 하나씩 처리하는 경로에서는 애초에 발생하지 않는다.
     """
 
 
 def validate_transition(current: AssetStatus | str, target: AssetStatus | str) -> None:
-    """``current → target`` 이 허용 전이가 아니면 ``InvalidTransitionError``."""
+    """이 전이가 허용된 것인지 확인한다.
+
+    Args:
+        current: 지금 상태.
+        target: 바꾸려는 상태.
+
+    Raises:
+        InvalidTransitionError: 허용 표에 없는 전이일 때. **조용히 무시하지 않는다** —
+            허용 밖 전이는 흐름이 꼬였다는 신호라 그 자리에서 드러나야 한다.
+    """
     cur = AssetStatus(current)
     tgt = AssetStatus(target)
     if tgt not in ALLOWED_TRANSITIONS.get(cur, frozenset()):
@@ -104,13 +113,20 @@ def set_status(
 ) -> None:
     """현재 상태를 읽어 전이를 검증한 뒤 ``asset.status`` 를 **조건부**로 갱신한다.
 
-    ``reason`` 은 ``status_reason`` 에 기록(정상 전이 시 None → 이전 사유 클리어).
+    **DB에 쓴다.** 검사와 갱신 사이에 남이 끼어들 수 있으므로, 갱신에도 "지금 이 상태일
+    때만"이라는 조건을 건다 — 둘이 동시에 통과해도 실제로 바뀌는 쪽은 하나다.
 
-    동시성(원자성): UPDATE 에 ``WHERE asset_id=%s AND status=<기대 현재상태>`` 가드를 둔다.
-    두 워커가 같은 현재 상태를 읽어 둘 다 검증을 통과해도, DB 가 한쪽만 적용하고
-    나머지는 0행이 된다(lost update 거부). 0행이면 그사이 다른 워커가 바꾼 실제 상태를
-    재조회해 ``ConcurrentTransitionError`` 로 알린다. 단일 워커 순차 경로에서는 항상
-    1행이라 충돌이 나지 않고 결과·검증 순서·status_reason 이 기존과 100% 동일하다(회귀 0).
+    Args:
+        conn: DB 연결.
+        asset_id: 대상 자산.
+        target: 바꿀 상태.
+        reason: 사유. **주지 않으면 이전 사유가 지워진다** — 정상 전이는 사유를 남길 일이
+            없으므로 이것이 기본 동작이다.
+
+    Raises:
+        InvalidTransitionError: 허용 밖 전이일 때.
+        ConcurrentTransitionError: 그사이 남이 상태를 바꿔 갱신이 0행일 때. 실제 상태를
+            다시 읽어 메시지에 담는다.
     """
     tgt = AssetStatus(target)
     current = fetch_status(conn, asset_id)

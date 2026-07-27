@@ -21,14 +21,28 @@ class ImageMeta(TypedDict):
 
 
 def _to_hex(rgb: tuple[int, int, int]) -> str:
-    """RGB 삼원색을 ``#rrggbb`` 문자열로 바꾼다(대표색을 메타에 담을 형태)."""
+    """RGB 값을 ``#rrggbb`` 문자열로 바꾼다(메타에 담을 형태).
+
+    Args:
+        rgb: 0~255 세 값.
+
+    Returns:
+        16진수 색 문자열.
+    """
     return "#{:02x}{:02x}{:02x}".format(*rgb)
 
 
 def _extract_dominant_colors(img: Image.Image, top_k: int = 5) -> list[str]:
-    """
-    Pillow quantize 기반으로 대표 색상 추출.
-    속도를 위해 512x512 이하로 리사이즈 후 계산한다.
+    """이미지의 대표 색을 뽑는다.
+
+    원본 그대로 세면 픽셀 수만큼 오래 걸린다 — 작게 줄여도 색 분포는 거의 그대로다.
+
+    Args:
+        img: 대상 이미지.
+        top_k: 뽑을 색 수. **0 이하면 빈 목록**을 돌려준다(색 정보를 끄는 용도).
+
+    Returns:
+        16진수 색 문자열 목록(많이 쓰인 색 순서).
     """
     if top_k <= 0:
         return []
@@ -60,13 +74,17 @@ def extract_image_meta(
     *,
     dominant_top_k: int = 5
 ) -> ImageMeta:
-    """
-    이미지 메타 및 특징 정보 추출.
+    """이미지의 크기·색 모드·포맷과 대표 색을 뽑는다.
 
-    Returns
-    -------
-    ImageMeta
-        ``width``, ``height``, ``color_mode``, ``file_format``, ``dominant_colors``(hex 문자열 리스트).
+    Args:
+        file_path: 대상 파일.
+        dominant_top_k: 뽑을 대표 색 수. 0 이하면 색을 뽑지 않는다.
+
+    Returns:
+        폭·높이·색 모드·포맷·대표 색 목록.
+
+    Raises:
+        FileNotFoundError: 파일이 없을 때.
     """
     path = Path(file_path)
     if not path.is_file():

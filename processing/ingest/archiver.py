@@ -1,6 +1,6 @@
-"""061 — Airflow 인입 파일 아카이브 헬퍼 (감시 디렉터리 비우기).
+"""인입 파일 아카이브 헬퍼 — 감시 디렉터리를 비운다.
 
-Airflow 감시 수집(030)에서 인입(``WATCHER_INBOX_DIR``) 파일을 수명주기에 따라 ``archive/`` 로 옮겨
+감시 수집에서 인입 디렉터리의 파일을 수명주기에 따라 ``archive/`` 로 옮겨
 감시 대상을 비운다: **중복 파일**은 collect 시 즉시(``dag_collect``), **처리완료(registered)** 파일은
 처리 후(``dag_process`` 꼬리 ``archive_processed``)에 이동한다. 이동 시 자산 ``fs_path`` 를 아카이브
 경로로 갱신해 다운로드·썸네일·재처리가 유효하게 유지한다(호출부 책임).
@@ -19,12 +19,12 @@ from collections.abc import Callable, Iterable
 from datetime import date
 from typing import Any
 
-# 표시용 파일명 유틸(``strip_asset_id_prefix``·``display_file_name``)은 077 레포 분리에서 코어
+# 표시용 파일명 유틸(``strip_asset_id_prefix``·``display_file_name``)은 코어
 # ``src/config/filename_util.py`` 로 승격됐다(백엔드가 참조·아카이브 이동로직과 분리).
 
 
 def assert_archive_separate(inbox_root: str, archive_root: str) -> None:
-    """아카이브 루트가 인입 하위이면 fail-fast(061·오설정 방지).
+    """아카이브 뿌리가 인입 하위면 그 자리에서 막는다(설정 실수 방지).
 
     이동 후 fs_path 가 인입 밖이라는 전제(멱등·자기수렴)가 archive_root⊂inbox_root 면 깨진다 —
     이동된 파일이 여전히 인입 하위라 다음 스윕이 재대상으로 잡고 파일명이 계속 자란다. 진입 시 차단.
@@ -57,8 +57,17 @@ def archive_dest(
 ) -> str:
     """아카이브 목적 경로 = ``root/[subdir/]YYYYMMDD/filename`` (순수·결정적).
 
-    동명 파일이 이미 있으면 ``stem_1.ext``, ``stem_2.ext`` … 로 결정적으로 회피한다(``exists`` 주입 —
-    같은 배치 내 예약 dest 도 함께 검사하려고 호출부가 래핑한다). ``when`` 주입으로 시각 비결정 제거.
+    Args:
+        root: 아카이브 뿌리 경로.
+        filename: 파일 이름.
+        when: 날짜 폴더로 쓸 날짜. **인자로 받는다** — 안에서 오늘을 읽으면 같은 입력이
+            날짜에 따라 다른 경로를 내 테스트도 재실행도 흔들린다.
+        subdir: 뿌리 아래 한 단계 더 둘 폴더. 빈 값이면 두지 않는다.
+        exists: 경로 존재 확인 함수. **파일시스템 없이 검증하려고 열어 둔 자리**다 —
+            운영 호출부는 주지 않고 기본값(실제 디스크 조회)을 쓴다.
+
+    Returns:
+        목적 경로. 같은 이름이 있으면 뒤에 번호를 붙여 피한다.
     """
     day = when.strftime("%Y%m%d")
     parts = [root, subdir, day] if subdir else [root, day]
@@ -66,6 +75,8 @@ def archive_dest(
     candidate = os.path.join(base, filename)
     if not exists(candidate):
         return candidate
+    # 같은 이름이 있으면 번호를 하나씩 올려 가며 빈 자리를 찾는다 — 시각·난수를 쓰지 않아
+    # 같은 상황이면 같은 경로가 나온다(재시도해도 파일이 흩어지지 않는다).
     stem, suffix = os.path.splitext(filename)
     n = 1
     while True:
@@ -94,8 +105,16 @@ def plan_archive_moves(
 ) -> list[tuple[str, str, str]]:
     """registered ``(asset_id, fs_path, created_at)`` 중 **인입 하위**인 것만 ``(asset_id, src, dest)`` 로(순수·결정적).
 
-    이미 아카이브 경로(인입 밖)인 자산은 제외돼 스윕이 자기수렴한다(멱등). dest 는 ``registered_dest`` 로
-    asset_id 키 결정적 경로라 파일시스템 상태·재스윕 타이밍에 무관하게 재현된다(C4 복구 안전).
+    **여러 번 돌려도 안전하다** — 이미 옮긴 자산은 인입 밖에 있어 자연히 빠지고, 목적
+    경로는 자산 id 로 정해지므로 언제 다시 돌려도 같은 곳을 가리킨다.
+
+    Args:
+        rows: ``(asset_id, 현재 경로, 생성일)`` 목록.
+        inbox_root: 인입 뿌리. **이 아래 있는 것만** 옮긴다.
+        archive_root: 옮겨 갈 뿌리.
+
+    Returns:
+        ``(asset_id, 원본, 목적)`` 목록. 실제로 옮기지는 않는다(계획만 세운다).
     """
     moves: list[tuple[str, str, str]] = []
     for asset_id, fs_path, created_at in rows:
@@ -112,7 +131,7 @@ def archive_registered_assets(db: Any, *, inbox_root: str, archive_root: str) ->
     ``status='registered'`` 이면서 ``fs_path`` 가 인입 하위인 자산만 스윕한다(``plan_archive_moves`` 필터).
     이동 후 fs_path 가 인입 밖이라 다음 스윕서 제외돼 자기수렴한다. **이동→fs_path 갱신 순**(C4: 크래시로
     갱신 누락 시 dest 가 asset_id 키 결정적이라 다음 스윕이 같은 dest 재현→``execute_move`` no-op 후 갱신
-    재시도). DAG(``dag_process.archive_processed``)의 얇은 래퍼가 이 함수를 호출한다(FR-011·로직 0). 반환=이동 건수.
+    재시도). 스케줄러 태스크는 이 함수를 부르는 얇은 껍데기다(그쪽에 로직 없음). 반환=이동 건수.
     ``db`` 는 ``PostgresUtil`` 계약(``with db.transaction() as conn``·``conn.cursor()``)만 요구한다(주입·테스트 용이).
     """
     assert_archive_separate(inbox_root, archive_root)

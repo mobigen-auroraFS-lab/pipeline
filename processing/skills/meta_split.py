@@ -14,7 +14,15 @@ EXT_META_KEYS: frozenset[str] = frozenset(
 
 
 def split_core_ext(meta: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """meta 를 (core_meta, ext_meta) 로 분리. 키 합집합은 원본과 동일(무손실)."""
+    """추출 메타를 파일 정보와 내용 신호로 나눈다.
+
+    Args:
+        meta: 추출이 만든 메타 dict.
+
+    Returns:
+        ``(파일·시스템 정보, 내용 신호)``. **두 쪽의 키를 합치면 원본과 같다** —
+        나누는 과정에서 아무것도 잃지 않는다.
+    """
     core: dict[str, Any] = {}
     ext: dict[str, Any] = {}
     for k, v in meta.items():

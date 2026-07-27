@@ -26,7 +26,7 @@ class TranscriptionResult(TypedDict):
 
 @lru_cache(maxsize=2)
 def _get_whisper(model_size: str, device: str, compute_type: str) -> WhisperModel:
-    """Whisper 모델 프로세스 캐시(069 P1-5) — 파일마다 재로드(수 GB 가중치·수 초)를 제거한다.
+    """음성 인식 모델을 프로세스에 캐시한다 — 파일마다 다시 올리면 수 GB·수 초가 반복된다.
 
     같은 (model_size, device, compute_type) 조합은 1회만 로드해 재사용한다. maxsize=2 는
     CPU/GPU 조합 전환 여지만 남긴 보수값(배치는 사실상 단일 조합). 추론 전용이라 상태 오염 없음.
@@ -54,7 +54,7 @@ def transcribe_audio_local(
         language=language,
         vad_filter=True,
         beam_size=5,
-        # 069 B2(P2-2): faster-whisper 는 temperature 미지정 시 기본 폴백 래더
+        # ⚠️ 온도를 지정하지 않으면 라이브러리가 기본 폴백 사다리
         # [0.0, 0.2, 0.4, 0.6, 0.8, 1.0] 로, 낮은 온도 결과가 compression/logprob 임계에
         # 걸리면 더 높은 온도(샘플링)로 재시도해 비결정 전사가 나온다. temperature=0.0 을
         # 명시해 그 래더를 끄고 재현성을 고정한다(헌법 3조).

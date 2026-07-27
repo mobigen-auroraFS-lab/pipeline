@@ -64,14 +64,29 @@ def classify(
     # Stage3 LLM 판별 주입 seam(기본=온프레미스 gemma). 테스트·대체 구현이 이 인자로 주입한다.
     _llm_classify: Callable = stage3_gemma.classify,
 ) -> ClassificationResult:
-    """프로파일 기반 도메인-불가지 3-stage cascade."""
+    """싼 판정부터 차례로 시도해 도메인을 정한다 — 확실해지는 순간 멈춘다.
+
+    ① 파일 머리의 시그니처(비용 0) → ② 어휘 스캔(비용 0) → ③ LLM(느리고 비싸다).
+    앞 단계에서 확정되면 뒤는 돌지 않는다.
+
+    Args:
+        file_path: 판정할 파일.
+        modality: 파일 종류(텍스트 추출 방식을 고르는 데 쓴다).
+        provider: 도메인 규칙 묶음을 주는 곳. 미주입이면 등록된 것 전부를 쓴다 —
+            **새 도메인이 생겨도 이 함수는 바뀌지 않는다**.
+        _llm_classify: 마지막 단계의 LLM 판정 함수. 주입하면 네트워크 없이 검증된다.
+
+    Returns:
+        판정 결과(라벨·신뢰도·어느 단계에서 정해졌는지·단계별 근거). 근거를 함께 담는
+        이유는, 뒤에서 이 값을 보고 보류 여부를 판단하는 소비처가 있기 때문이다.
+    """
     provider = provider or RegistryProvider()
     profiles = provider.all_profiles()
 
     # Stage 1 — 시그니처: 정확히 한 도메인만 매칭하면 확정, 0/충돌은 Stage 2 로.
     # s1_scores 구조: {domain: {"signature": <종류>, **detail}}
     # detail 에 "signature" 키가 없어야 충돌 없음 — SigHit.detail 은 관례상 그러하나 주의.
-    # 소비처(ingest 스텝·069 FR-E3 이관)가 이 구조를 참조해 deferred 자산을 판별한다.
+    # ⚠️ 적재 스텝이 **이 구조를 읽어** 보류 자산을 판별한다 — 모양을 바꾸면 그쪽이 깨진다.
     head = _read_head(file_path)
     s1_scores: dict[str, dict] = {}
     for p in profiles:

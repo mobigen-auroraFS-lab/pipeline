@@ -2,8 +2,8 @@
 
 배선 현황(두 표현이 공존)
     - ``Candidate``/``ScoredPair``/``Decision`` 은 contracts.py cross_asset Protocol 의 입출력
-      타입이며, 샘플 도메인(spec 016)이 ``cross_runner`` + ``sample_strategies`` 로 처음 실제
-      배선·실행한다. (단계 A에서 정의만 했고 016 에서 활성화됨.)
+      타입이며, 샘플 도메인이 ``cross_runner`` + ``sample_strategies`` 로 처음 실제
+      배선·실행한다.
     - 일반·의료의 legacy relations 경로(``run_relations`` propose)는 아직 이 dataclass 가
       아니라 dict(``src/relations`` 의 ``EmbeddingCandidate`` TypedDict 등)를 쓴다.
     - ``Evidence`` 의 ``m_prob``/``u_prob``/``weight``(=log(m/u))는 레코드 링크

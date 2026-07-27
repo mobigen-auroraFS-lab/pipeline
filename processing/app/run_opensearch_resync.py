@@ -1,26 +1,20 @@
-"""PG(`asset_*`) 전체 → OpenSearch 재색인 **복구 도구** CLI (검색 엔진 도입 — spec 020 G4).
+"""DB 의 자산 전체를 검색 엔진으로 다시 색인하는 **복구 도구**.
 
-정상 경로(새 자산 실시간 반영)는 run_ingest 증분 훅(G3)이 담당한다. 본 CLI 는 그 정상 경로가
-아니라 **복구/관리** 도구다 — OpenSearch 인덱스가 **손실**되거나 PG 와 **드리프트**(어긋남)
-났거나 스키마가 바뀌었을 때, PG 의 `registered` 자산 전체를 OpenSearch 로 **재색인**해 깨끗이
-맞춘다(US2). `_id=asset_id` upsert 라 **재실행 멱등**(중복 0, FR-003).
+**흐름에서의 위치**: 정상 경로가 아니다. 새 자산은 적재가 끝날 때마다 그 자리에서 색인되고,
+이 도구는 색인이 **유실·손상됐거나 DB 와 어긋났거나 매핑을 바꿨을 때**만 쓴다.
 
-CQRS — PG 는 **읽기 전용**(SELECT 만, FR-004·헌법 6조), 쓰기는 OpenSearch 에만.
-`--recreate` 는 인덱스 삭제 후 재생성(스키마 변경 시·**파괴적 옵트인**); 기본은 비파괴 upsert.
+DB 는 **읽기만** 한다(헌법 6조) — 쓰기는 검색 엔진 쪽에만. 같은 자산을 다시 넣으면 덮어쓰므로
+여러 번 돌려도 안전하다.
 
-설계 — 순수 조립부 / 실행(IO) 경계 (docs/테스트_가이드.md §0 하이브리드, 017/019 measure 러너 동형)
-    - **순수 조립부**(단위 검증, OS·DB 무관): `run_resync(client, conn, *, channel, index, recreate)`
-      는 동기화 코어 `sync_all` 을 **주입 seam**(`sync_fn`)으로 호출하고 결과(status·ok·errors)를
-      보고만 한다. `tests/test_run_opensearch_resync.py` 가 가짜 client/conn/sync_fn 을 주입해
-      OS·DB 없이 조립(인자 전달·결과 보고)을 단위로 덮는다.
-    - **실행(IO) 부트스트랩**(G5·사람): `main()` 만 load_dotenv→init_settings→get_client→
-      PostgresUtil 읽기전용 트랜잭션에서 실제 `sync_all` 을 돌린다 — 실OS·실DB 재색인은 G5 사람 단계.
+⚠️ ``--recreate`` 는 **인덱스를 지우고 다시 만든다.** 재색인이 끝날 때까지 검색이 비어 보이므로
+매핑을 바꿀 때만 쓴다. 기본은 지우지 않는 덮어쓰기다.
+
+IO 경계를 나눠 뒀다: 조립부는 동기화 함수를 **주입받아** 부르고 결과만 보고하므로 검색 엔진·DB
+없이 단위 검증되고, 실제 연결·트랜잭션은 ``main`` 만 만든다.
 
 사용법
-    conda activate AuroraFS
-    python -m processing.app.run_opensearch_resync --env dev               # 활성 채널·설정 인덱스, 비파괴 upsert
-    python -m processing.app.run_opensearch_resync --env dev --recreate    # 인덱스 재생성(스키마 변경 시)
-    python -m processing.app.run_opensearch_resync --env dev --channel st_bge --index assets_bge
+    python -m processing.app.run_opensearch_resync --env dev               # 덮어쓰기(기본)
+    python -m processing.app.run_opensearch_resync --env dev --recreate    # 인덱스 재생성
 """
 
 from __future__ import annotations
@@ -49,7 +43,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="인덱스를 삭제 후 재생성(파괴적·스키마 변경 시만). 기본은 비파괴 upsert.",
     )
-    # 027: 검색 정규화 융합이 서버 파이프라인에서 클라이언트 융합으로 이동해 --ensure-pipeline 옵션은
+    # 점수 융합을 서버가 아니라 클라이언트에서 하게 바뀌어 ``--ensure-pipeline`` 옵션은
     # 제거됐다(등록할 서버 파이프라인이 없음). 재색인 도구는 인덱스 동기화에만 집중한다.
     return p
 
@@ -65,14 +59,25 @@ def run_resync(
     noise_patterns: Any = (),
     sync_fn: Callable[..., tuple[str, int, list[Any]]] = sync_all,
 ) -> dict[str, Any]:
-    """복구 러너의 **순수 조립부** — 전체 재동기화 코어(`sync_all`)를 호출하고 결과를 보고한다.
+    """동기화 코어를 부르고 결과를 보고용으로 모은다 — 조립만 하는 층이다.
 
-    `sync_fn` 은 동기화 seam(기본 `opensearch_sync.sync_all`)으로, 단위 테스트가 가짜를 주입해
-    OS·DB 없이 인자 전달·결과 보고를 검증한다. PG 읽기 전용→OS 쓰기·멱등(`_id=asset_id`)은 코어의
-    책임이고, 여기서는 (이미 해소된) channel·index·recreate 를 그대로 흘려보내고 코어가 돌려준
-    ``(상태, 색인수, 오류목록)`` 을 보고용 dict 로 모은다(상태·색인 맥락을 함께 담아 출력·검수 용이).
+    값 해소(어느 채널·어느 인덱스인지)는 호출부가 이미 끝냈고, 여기서는 그대로 흘려보낸다.
+
+    Args:
+        client: 검색 엔진 클라이언트.
+        conn: DB 연결. **읽기만 한다**(헌법 6조).
+        channel: 임베딩 채널.
+        index: 대상 인덱스.
+        recreate: ⚠️ **참이면 인덱스를 지우고 다시 만든다** — 되돌릴 수 없다.
+        nori_user_words: 형태소 분석 사용자 사전. 설정에서 주입한다.
+        noise_patterns: 파일명 정제 패턴. 설정에서 주입한다.
+        sync_fn: 동기화 함수. **바꿔 끼울 수 있게 열어 뒀다** — 검색 엔진·DB 없이 인자
+            전달과 결과 보고를 단위 검증한다.
+
+    Returns:
+        상태·성공 수·오류 목록에 어느 채널·인덱스였는지를 함께 담은 dict(검수용).
     """
-    # 026: 인덱스 analyzer 사전·파일명 정제 패턴은 settings 단일 출처를 IO 층이 주입한다(미지정=기본).
+    # 형태소 사전·파일명 정제 패턴은 설정 한 곳에서 IO 층이 주입한다(미지정=기본값).
     status, ok, errors = sync_fn(
         client, conn, index=index, channel=channel, recreate=recreate,
         nori_user_words=nori_user_words, noise_patterns=noise_patterns,
@@ -88,7 +93,16 @@ def run_resync(
 
 
 def format_report(report: dict[str, Any], *, doc_count: int | None = None) -> str:
-    """복구 결과를 사람이 읽는 한 줄 요약으로(순수). 오류가 있으면 상위 2건 샘플을 덧붙인다."""
+    """복구 결과를 사람이 읽는 한 줄로 만든다(순수 함수).
+
+    Args:
+        report: 조립부가 돌려준 결과 dict.
+        doc_count: 색인의 전체 문서 수. ``None`` 이면 그 항목을 빼고 찍는다.
+
+    Returns:
+        요약 문자열. **오류는 앞 2건만** 덧붙인다 — 전부 찍으면 콘솔이 넘쳐 정작 상태를
+        못 본다(자세한 내용은 로그에 있다).
+    """
     line = (
         f"  인덱스 상태: {report['status']} | 색인 성공: {report['ok']} | "
         f"오류: {len(report['errors'])} | channel='{report['channel']}' index='{report['index']}'"
@@ -103,7 +117,7 @@ def format_report(report: dict[str, Any], *, doc_count: int | None = None) -> st
 # ── 실행(IO) 부트스트랩 — 실OS·실DB 재색인은 G5(사람) ─────────────────────────────
 # 1) load_dotenv(.env.{env}) → 2) init_settings → 3) channel·index 해소(미지정=활성·설정) →
 # 4) get_client → 5) PostgresUtil 읽기전용 트랜잭션에서 run_resync(=sync_all) → 6) 결과 출력.
-# PG 는 SELECT 만(FR-004·헌법 6조). 위 run_resync 는 OS·DB 없이 단위 검증되는 순수 조립부다.
+# PG 는 SELECT 만(헌법 6조). 위 run_resync 는 검색 엔진·DB 없이 단위 검증되는 순수 조립부다.
 # 무거운 의존(dotenv·settings·PostgresUtil·get_client→opensearch-py)은 실행 시에만 지연 import 한다.
 def main() -> int:
     """PostgreSQL 의 자산을 OpenSearch 로 **전부 다시 색인**한다(복구 도구).
@@ -128,7 +142,7 @@ def main() -> int:
     bootstrap_env(args.env)
 
     cfg = get_current_settings()
-    channel = resolve_channel(args.channel)  # 미지정=활성 프로파일(018)
+    channel = resolve_channel(args.channel)  # 미지정이면 활성 프로파일을 따른다
     index = args.index or cfg.opensearch.index  # 미지정=OPENSEARCH_INDEX
 
     client = get_client()
@@ -154,7 +168,7 @@ def main() -> int:
         )
 
     with db:
-        # 읽기 전용 조회 트랜잭션(원본 PG 무수정, FR-004). 멱등(_id=asset_id upsert)이라 재시도 안전.
+        # 읽기 전용 트랜잭션 — 원본을 고치지 않는다. 같은 자산을 다시 넣으면 덮어쓰므로 재시도도 안전하다.
         report = db.execute_in_transaction(_resync_txn, idempotent=True)
 
     doc_count = client.count(index=index).get("count")

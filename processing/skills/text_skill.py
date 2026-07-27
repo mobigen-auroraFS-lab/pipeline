@@ -26,7 +26,7 @@ def _extract_text_meta(ctx: ExtractContext) -> AssetRecord:
         encoding=cfg.encoding,
         chunk_size=cfg.embed.chunk_size,
         # 토큰 수는 **활성 임베딩 모델**(active_embed_model)의 토크나이저로 센다 — _embed_text 와 동일
-        # 모델이라 정합(종전 cfg.embed.model=KoSimCSE 하드코딩은 st_api=bge-m3 와 불일치했음).
+        # 모델이라 정합. ⚠️ 설정에서 모델명을 직접 읽으면 채널을 바꿨을 때 라벨만 옛 모델로 남는다.
         embedding_model_name=active_embed_model(cfg),
     )
     # | 연산자로 dict 머지 — 오른쪽(요약)이 같은 키를 덮어쓴다.
@@ -39,12 +39,19 @@ def _extract_text_meta(ctx: ExtractContext) -> AssetRecord:
 def _embed_text(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
     """텍스트 문서를 청크 단위로 임베딩해 EmbeddingItem 목록을 반환한다.
 
-    텍스트는 미디어(이미지/영상/오디오)와 달리 scratch 핸드오프 없이
-    파일에서 직접 청크를 재생성한다 — extract 단계에서 공유 계산이 없기 때문이다.
-    chunk_index 는 0-based 순번으로, DB persist 시 활성 채널(기본 'st')과 함께 청크를 식별한다.
+    다른 모달리티와 달리 **추출 단계의 중간 산출물을 넘겨받지 않는다** — 텍스트는 파일에서
+    바로 다시 쪼개도 같은 결과가 나오고, 추출 단계에 공유할 계산이 없다.
 
-    채널·모델은 활성 임베딩 프로파일(018)로 결정한다 — 적재·검색·관계가 공유하는 단일 출처.
-    기본 active='st' → channel='st'·KoSimCSE 로 기존 적재와 동치(회귀 0).
+    어느 채널·어느 모델을 쓸지는 활성 임베딩 프로파일 하나가 정한다 — 적재·검색·관계가
+    같은 출처를 봐야 질의와 저장이 같은 공간에서 만난다.
+
+    Args:
+        ctx: 처리 문맥(파일 경로·설정).
+        rec: 추출 레코드. **이 함수는 읽지 않는다** — 슬롯 계약을 맞추려고 받는 인자다
+            (텍스트는 파일에서 직접 청크를 만든다).
+
+    Returns:
+        청크마다 한 항목. 청크 순번은 0부터이며, 채널과 함께 청크를 식별한다.
     """
     from src.embedders.text_embedder import embedding_text_chunks
 
@@ -58,7 +65,7 @@ def _embed_text(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
         chunk_size=cfg.embed.chunk_size,
         embedding_model_name=model,
         normalize_embeddings=cfg.embed.normalize,
-        channel=channel,   # 062: 채널 백엔드(로컬/API)로 라우팅. 기본 st=로컬(동작 불변).
+        channel=channel,   # 채널이 로컬 모델이냐 원격 API 냐를 정한다.
         settings=cfg,
     )
     return [

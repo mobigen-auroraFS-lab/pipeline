@@ -16,7 +16,17 @@ _MAX_TEXT = 4000  # 프롬프트에 포함할 텍스트 최대 길이 — LLM �
 
 
 def _build_prompt(labels: list[str]) -> str:
-    """후보 라벨 목록을 넣어 분류 프롬프트를 만든다(목록 밖 답은 호출부가 버린다)."""
+    """후보 라벨을 넣어 분류 프롬프트를 만든다.
+
+    ⚠️ 끝을 "텍스트:" 로 열어 둔다 — 호출부가 본문을 **그대로 이어 붙이는** 구조라,
+    끝 문구를 바꾸면 프롬프트가 어긋난다.
+
+    Args:
+        labels: 후보 라벨. 목록 밖 답이 와도 호출부가 버린다.
+
+    Returns:
+        본문을 이어 붙일 수 있는 프롬프트 앞부분.
+    """
     # 프롬프트 끝에 '\n\n텍스트:\n' 를 두어 classify() 가 text 를 직접 이어 붙인다.
     opts = " 또는 ".join(labels)
     return (
@@ -43,13 +53,18 @@ def classify(
     *,
     complete: Callable[[str], str] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    """온프레미스 LLM 으로 labels 중 하나 판정. 허용 외/실패 → 'review'.
+    """LLM 에게 후보 중 하나를 고르게 한다 — 못 고르면 사람 검토로 넘긴다.
 
-    계약:
-    - labels 는 소문자 문자열 집합이어야 한다. LLM 응답을 .lower() 한 뒤 이 집합과 비교.
-    - 의료 데이터의 경우 외부 LLM 호출 금지 정책이 complete= 주입으로 강제된다
-      (NoExternalLLM 정책 — pipeline.policy.medical_strict).
-    - temperature=0 으로 호출해 결정 재현성 100% 를 보장(src.llm.client 내부 설정).
+    Args:
+        text: 판정할 본문. 길면 앞부분만 쓴다(컨텍스트 여유분 확보).
+        labels: 후보 라벨. **소문자여야 한다** — 응답을 소문자로 낮춘 뒤 비교하므로,
+            대문자가 섞이면 맞는 답도 후보 밖으로 판정된다.
+        complete: LLM 호출 함수. 주입하면 네트워크 없이 검증된다. 외부 LLM 금지 정책은
+            **이 자리에 무엇을 꽂느냐로** 강제된다.
+
+    Returns:
+        ``(라벨, 근거 dict)``. 후보 밖 답이거나 호출이 실패하면 **검토 라벨**을 돌려준다 —
+        틀린 도메인으로 확정하는 것보다 사람이 보게 두는 편이 낫다.
     """
     complete = complete or _default_complete
     try:

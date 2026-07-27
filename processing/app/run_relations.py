@@ -35,18 +35,18 @@ from src.relations.resolution_persist import (
 
 _LOG = logging.getLogger("meta_extract.run_relations")
 
-# cross_asset 슬롯 중 레지스트리에서 Callable 로 resolve 되는 슬롯(008, 일반 경로 가드용).
+# 일반 경로에서 배선을 확인하는 슬롯들 — 판정 슬롯은 빠진다(점수 전략 안에서 처리).
 # 'decide'(confidence)는 propose_relations_for_asset 내부 auto_approve 임계로 처리되어
 # 별도 Callable 이 등록돼 있지 않으므로 resolve 대상에서 제외한다(packs.py·builtins.py 주석 참조).
 # **무변경**: 일반 팩 가드(_resolve_cross_asset_slots 기본 인자)에서만 쓴다.
 _RESOLVED_CROSS_SLOTS: tuple[str, ...] = ("candidates", "score", "persist_edges")
 
-# 제네릭 cross_asset 러너(016)가 실행하는 contracts.py 계약 4슬롯 — 'decide' 를 포함한다.
+# 공용 러너가 실행하는 계약 4슬롯 — 판정 슬롯까지 포함한다.
 # 비일반 팩(예 샘플)은 decide 슬롯에 별도 Callable(sample_decide)을 등록하므로 4슬롯 전부를
 # resolve 해 run_cross_asset 에 넘긴다. 일반 경로의 _RESOLVED_CROSS_SLOTS(3슬롯)와는 별개다.
 _GENERIC_CROSS_SLOTS: tuple[str, ...] = ("candidates", "score", "decide", "persist_edges")
 
-# 큐 last_reason 비식별 표식(009, 헌법 10조 — PHI/풀경로 금지).
+# 큐에 남길 고정 표식 — ⚠️ 식별 가능한 값(예외 메시지·전체 경로)을 담지 않는다(헌법 10조).
 # 고립(엣지0)은 표식 1개, 예외는 예외 **타입명**만 기록한다(메시지·경로 미포함).
 _REASON_ISOLATED = "isolated:no_edges"
 
@@ -98,23 +98,24 @@ def _resolve_cross_asset_slots(
     registry: StrategyRegistry = DEFAULT_REGISTRY,
     slots: tuple[str, ...] = _RESOLVED_CROSS_SLOTS,
 ) -> dict[str, Callable[..., Any]]:
-    """팩의 cross_asset 슬롯명을 레지스트리에서 Callable 로 resolve(미배선 가드, FR-002).
+    """팩이 적어 둔 슬롯 이름을 실제 함수로 바꾼다 — **실행 전에** 배선을 확인한다.
 
-    **목적(헌법 4조)**: 도메인 차이를 코드 if/else 가 아니라 "팩이 고른 전략 이름"으로 표현한다.
-    여기서 슬롯명을 registry.resolve 로 검증함으로써, 의료 ER(단계 D)이 전용 cross_asset
-    전략(예: blocking_5keys)을 **레지스트리에 등록만 하면** core 파이프라인 수정 없이 갈리는
-    자리를 만든다. 등록 전 상태(미배선)면 KeyError → NotImplementedError 로 승격해 자산 단위
-    격리(run_relations 의 except)로 흘려보낸다 — 배치는 중단되지 않는다.
+    도메인 차이를 코드 분기가 아니라 "팩이 고른 전략 이름"으로 표현하기 때문에(헌법 4조),
+    이름이 실제 전략을 가리키는지 여기서 확인해 둬야 한다. 새 도메인 전략은 **등록만 하면**
+    실행 경로를 고치지 않고 갈린다.
 
-    **slots 인자(016)**: 어떤 슬롯 집합을 resolve 할지 선택한다. 기본은 일반 경로 가드용
-    _RESOLVED_CROSS_SLOTS(3슬롯, 'decide' 제외 — 일반은 propose 내부 auto_approve 처리)이며,
-    제네릭 러너 경로(비일반 팩)는 _GENERIC_CROSS_SLOTS(4슬롯, 'decide' 포함)를 넘긴다.
-    기본값이 _RESOLVED_CROSS_SLOTS 라 기존 호출·테스트는 무영향이다.
+    Args:
+        pack: 도메인 팩(슬롯 → 전략 이름).
+        registry: 전략을 찾을 레지스트리.
+        slots: 확인할 슬롯 집합. 일반 경로는 판정 슬롯을 뺀 셋만 본다 — 그 판정이 점수
+            전략 안에서 함께 처리되기 때문이다. 공용 러너 경로는 넷 전부를 본다.
 
     Returns:
-        슬롯 이름 → resolve 된 Callable. (검증 통과 시에만 반환)
+        슬롯 이름 → 전략 함수(전부 확인된 상태에서만 반환).
+
     Raises:
-        NotImplementedError: 슬롯이 가리키는 전략이 레지스트리에 미등록(단계 D 전 의료 등).
+        NotImplementedError: 슬롯이 비었거나 그 이름의 전략이 등록돼 있지 않을 때.
+            **배치를 세우지 않는다** — 호출부가 자산 단위로 격리해 실패로만 기록한다.
     """
     resolved: dict[str, Callable[..., Any]] = {}
     for slot in slots:
@@ -154,22 +155,28 @@ def _record_resolution(
 ) -> None:
     """한 자산 처리 결과를 큐에 반영 — **별도 fresh 트랜잭션**으로 격리(run_ingest 패턴 차용).
 
-    핵심(SC-008): 한 자산의 큐 upsert 실패가 다른 자산 처리나 이미 적재된 관계를 롤백하면 안 된다.
-    그래서 큐 갱신은 propose_relations_for_asset 트랜잭션 **밖**, 자산별 독립 fresh 트랜잭션에서 수행하고,
-    여기서 또 예외가 나면 로그만 남기고 흡수한다(배치·다른 자산에 전파 금지).
+    **DB에 쓴다** — 관계 적재 트랜잭션 **밖**의 새 트랜잭션에서. 큐 갱신이 실패했다고 이미
+    적재된 관계가 롤백되면 안 되기 때문이다. 여기서 또 예외가 나면 로그만 남기고 삼킨다.
 
-    attempts 는 별도 조회(``_fetch_attempts``) 후 이 fresh 트랜잭션에서 upsert 한다 — read-then-write 가
-    서로 다른 트랜잭션이라, 배치가 자산을 **순차 처리하는 단일 워커** 전제에서만 안전하다. 병렬화 시
-    두 워커가 같은 자산의 attempts 를 겹쳐 읽어 카운트가 어긋날 수 있다(TOCTOU — 병렬화 시 재설계 필요).
+    ⚠️ 시도 횟수를 **읽는 트랜잭션과 쓰는 트랜잭션이 다르다.** 배치가 자산을 하나씩 순차
+    처리한다는 전제에서만 안전하다 — 병렬로 돌리면 두 워커가 같은 값을 겹쳐 읽어 횟수가
+    어긋난다(병렬화하려면 이 부분을 다시 설계해야 한다).
 
-    last_reason 은 비식별만(헌법 10조): 고립은 _REASON_ISOLATED 표식, 예외는 예외 **타입명**만.
-    예외 메시지·파일 경로는 PHI/풀경로 누출 위험이 있어 큐에 담지 않는다.
+    ⚠️ 사유에는 **식별 가능한 내용을 담지 않는다**(헌법 10조): 고립은 고정 표식, 예외는
+    타입명만. 예외 메시지와 파일 경로에는 민감정보·전체 경로가 섞일 수 있다.
+
+    Args:
+        db: 트랜잭션을 열 수 있는 DB 핸들.
+        aid: 대상 자산.
+        edges_upserted: 이 자산에 적재된 엣지 수. **0 이면 '고립'** 으로 기록한다.
+        error: 처리 중 잡힌 예외. 없으면 ``None``.
+        max_attempts: 이 횟수를 넘기면 더 재시도하지 않는 상태로 굳힌다.
     """
     cur_attempts = _fetch_attempts(db, aid)
     status, next_attempts = decide_resolution_status(
         edges_upserted, cur_attempts, error=error, max_attempts=max_attempts
     )
-    # 035 #2: last_reason 3분기 — 예외=타입명(비식별), 고립(엣지0)=표식, 성공(엣지≥1)=None(reason 불요).
+    # 사유 3분기 — 예외는 타입명만, 이어진 게 없으면 고정 표식, 성공이면 사유 없음.
     if error is not None:
         reason: str | None = type(error).__name__
     elif edges_upserted == 0:
@@ -206,42 +213,37 @@ def run_relations(
     *,
     db: PostgresUtil,
     top_k: int | None = None,
-    # 036: 관계 후보 임베딩 채널 기본은 "st"(BGE 텍스트 임베더) — 4모달리티가 캡션으로 공유하는 단일
+    # 후보를 찾을 임베딩은 기본이 텍스트 채널 하나다 — 네 모달리티가 캡션으로 공유하는 단일
     # 텍스트 공간을 쓴다. 'both'(st+clip)는 텍스트·시각 코사인을 MAX 로 섞어 척도가 달라 emb_score 가 흐려진다.
     embedding_kind: EmbeddingKindFilter = "st",
     max_attempts: int | None = None,
     _domain_fn: Callable[[PostgresUtil, str], str] | None = None,
 ) -> dict[str, list[Any]]:
-    """자산 리스트 순회하며 관계 제안. 자산 단위 예외 흡수 + 미해소 큐 갱신.
+    """자산 목록을 돌며 관계를 제안한다 — 자산 하나의 실패가 배치를 멈추지 않는다.
 
-    반환값 구조: {"done": [(aid, edges_upserted, edges_kept), ...], "failed": [(aid, msg), ...]}.
-    배치 전체 성공 여부는 ``failed`` 리스트가 비어있는지로 판별한다(main 의 종료코드 참조).
+    **DB에 쓴다**(관계 엣지 + 처리 이력).
 
-    **cross_asset 슬롯 resolve(008, FR-001~003)**: 자산 domain_label → for_domain 으로 팩을 고르고,
-    팩의 cross_asset 슬롯을 _resolve_cross_asset_slots 로 레지스트리에서 resolve 한다(미배선 가드).
-    일반 팩(슬롯이 GENERAL_PACK.cross_asset 과 동일)은 결과 동치(회귀 0, FR-001/SC-001)를
-    구조적으로 보장하기 위해 기존 propose_relations_for_asset 로 위임한다 — 슬롯 전환의 목적은
-    "의료 전용 전략이 끼워질 자리 만들기"이지 일반 동작을 바꾸는 것이 아니다.
+    실행 경로는 **도메인 이름이 아니라 배선표 비교**로 갈린다(헌법 4조). 배선이 일반 팩과
+    같으면 기존 묶음 함수에 그대로 위임하고, 다르면 공용 러너로 계약 순서대로 실행한다.
+    이름으로 분기하면 도메인이 늘 때마다 이 함수를 고치게 된다.
 
-    **비일반 팩 → 제네릭 러너(016)**: 일반 묶음이 아닌 팩(예 샘플)은 4슬롯(decide 포함)을
-    _GENERIC_CROSS_SLOTS 로 resolve 해 cross_runner.run_cross_asset 으로 contracts.py 계약
-    순서대로 실행한다(NotImplementedError 였던 자리 교체). 미등록 전략 팩은 여전히
-    _resolve_cross_asset_slots 가 NotImplementedError 를 내고 바깥 except 가 failed 로 격리한다
-    (Acceptance 2 유지). 헌법 4조: 도메인명 코드 분기 없이 for_domain + cross_asset 비교로만 갈린다.
+    Args:
+        asset_ids: 처리할 자산 목록.
+        db: 트랜잭션을 열 수 있는 DB 핸들.
+        top_k: 후보로 볼 최대 이웃 수. ``None`` 이면 설정값.
+        embedding_kind: 후보를 찾을 임베딩 채널. 기본은 텍스트 하나만 쓴다 — 텍스트와
+            시각 유사도를 섞으면 척도가 달라 점수의 뜻이 흐려진다.
+        max_attempts: 재시도 상한. ``None`` 이면 설정값.
+        _domain_fn: 도메인 라벨 조회를 갈아끼우는 자리. ⚠️ 기본값을 정의 시점에 묶지 않고
+            **호출 시점에 이름으로 찾는다** — 그래야 테스트가 모듈 이름을 바꿔 끼울 수 있다.
 
-    **_domain_fn seam**: domain_label 조회를 주입 가능하게 한 seam. 기본(None)은 모듈 수준
-    _fetch_domain_label 를 **호출 시점에 이름으로** 조회한다 — 이래야 기존
-    ``mock.patch.object(rr, "_fetch_domain_label", ...)`` 가 그대로 먹어 회귀 0 이 보장된다
-    (정의 시점 바인딩이면 모듈 패치가 무시됨). 실 DB e2e 픽스처는 이 seam 으로 'sample' 라벨을
-    직접 주입해 비일반 러너 라우팅을 검증한다(G4).
-
-    **미해소 큐 갱신(009, SC-008)**: 각 자산 처리 직후 결과(edges_upserted/예외)로
-    ``decide_resolution_status`` 를 호출해 relation_resolution 큐를 **별도 fresh 트랜잭션**으로
-    갱신한다(자산별 격리). ``max_attempts`` 미지정 시 설정 ``relation_retry_max_attempts`` 를 쓴다.
+    Returns:
+        ``{"done": [(자산, 적재수, 유지수)], "failed": [(자산, 사유)]}``. 배치 성공 여부는
+        ``failed`` 가 비었는지로 판단한다.
     """
     # seam 기본값 해소: None 이면 모듈 수준 _fetch_domain_label 를 **호출 시점에** 잡는다.
     # (def 기본값으로 직접 바인딩하면 mock.patch.object(rr, "_fetch_domain_label", ...) 가 안 먹어
-    #  기존 테스트가 깨진다 — 회귀 0 을 위해 런타임 이름 조회로 둔다.)
+    #  테스트가 바꿔 끼운 이름이 무시된다 — 그래서 런타임 이름 조회로 둔다.)
     domain_fn = _domain_fn if _domain_fn is not None else _fetch_domain_label
     if max_attempts is None:
         from src.config.settings import get_current_settings
@@ -253,18 +255,18 @@ def run_relations(
         err: Exception | None = None
         try:
             domain = domain_fn(db, aid)  # seam(기본 _fetch_domain_label) — G4 e2e 가 'sample' 주입
-            pack = for_domain(domain)  # 미지정/review → GENERAL_PACK 폴백(FR-003)
+            pack = for_domain(domain)  # 모르는 라벨은 일반 팩으로 접힌다
             if pack.cross_asset == GENERAL_PACK.cross_asset:
-                # 일반 cross_asset 묶음 — 기존 경로에 위임해 결과를 100% 동치로 유지(FR-001, 헌법 8조).
+                # 배선이 일반 팩과 같으면 기존 묶음 함수에 그대로 위임한다(결과가 달라지지 않게).
                 # 슬롯별 전략을 잘게 호출하는 대신 검증된 propose_relations_for_asset 를 재사용한다.
-                # 일반 가드용 슬롯 resolve(미배선 가드, FR-002): 일반 팩은 전부 등록돼 있어 통과한다.
+                # 위임 전에도 배선은 확인한다 — 일반 팩은 전부 등록돼 있어 통과한다.
                 _resolve_cross_asset_slots(pack)
                 cat_s, cat_k, edges_u, edges_k = propose_relations_for_asset(
                     db, aid, top_k=top_k, embedding_kind=embedding_kind
                 )
             else:
                 # 비일반 팩(예 샘플): contracts.py 계약 4슬롯(decide 포함)을 resolve 해 제네릭
-                # 러너로 실행한다(016). 미등록 전략 팩이면 _resolve 가 NotImplementedError →
+                # 러너로 실행한다. 미등록 전략 팩이면 배선 확인이 NotImplementedError 를 내고 →
                 # 바깥 except 가 failed 격리(Acceptance 2 유지). 헌법 4조: 러너는 도메인 무관.
                 resolved = _resolve_cross_asset_slots(pack, slots=_GENERIC_CROSS_SLOTS)
                 # 루프 변수(resolved/aid)는 기본인자로 바인딩 — 늦은 바인딩 footgun 차단(ruff B023).
@@ -284,7 +286,7 @@ def run_relations(
             result["failed"].append((aid, str(exc)))
         # 자산 처리 결과를 큐에 반영(엣지0/예외/성공 모두). fresh 트랜잭션 격리.
         _record_resolution(db, aid, edges_u, error=err, max_attempts=max_attempts)
-    # 065 FR-404: 관계 배치 후 OS topics 재색인 훅(056 FR-301) 제거 — 065 는 주제를 자산 자기주제
+    # 관계 배치 뒤에 주제를 다시 색인하지 않는다 — 주제는 자산 자기주제
     # 정본(asset_topic)에서 부여하므로 관계 생성/변경이 자산 주제를 바꾸지 않는다(재색인 무의미).
     # 관계 파이프라인(후보→LLM→confidence→active·큐)은 불변, 주제 결정권만 회수됐다.
     return result
@@ -294,7 +296,7 @@ def run_relations(
 # [import 시점] 이 진입점은 processing.pipeline.builtins 를 import 해 DEFAULT_REGISTRY 에 cross_asset
 #   전략(candidates/score/persist_edges)을 등록한다(register_defaults 부수효과). run_relations 가
 #   팩의 cross_asset 슬롯을 registry.resolve 로 검증(미배선 가드)하기 때문이다. 일반 팩은 검증 통과
-#   후 propose_relations_for_asset 로 위임해 결과를 기존과 동치로 유지한다(FR-001).
+#   후 propose_relations_for_asset 로 위임해 결과가 달라지지 않게 한다.
 # [런타임·main() 안·순서 중요]:
 #   1) load_dotenv(.env.{env}, override=False)  2) init_settings(env): 필수 환경변수 검증+frozen 설정
 #   3) PostgresUtil() + `with db:`: 연결 풀+PG17 검증.  온프레미스 LLM 클라이언트는 propose 내부 첫 호출 시 지연 생성.
@@ -322,7 +324,7 @@ def main() -> int:
     )
     parser.add_argument("--top-k", dest="top_k", type=int, default=None)
     parser.add_argument(
-        # 036: 기본 bge-only(st_bge). 필요 시 --embedding-kind both|clip 로 시각 채널 포함 가능.
+        # 기본은 텍스트 채널만. 시각 채널을 섞고 싶으면 ``--embedding-kind`` 로 지정한다.
         "--embedding-kind", dest="embedding_kind", choices=["st", "clip", "both"], default="st"
     )
     parser.add_argument("asset_ids", nargs="*", metavar="ASSET_ID")
@@ -333,7 +335,7 @@ def main() -> int:
     db = PostgresUtil()
     with db:
         # 선택 분기: --retry(미해소+미시도) > --all(registered 전체) > 명시 asset_ids.
-        # --all·명시 asset_ids 경로는 무변경(회귀 0) — --retry 만 큐 기반 LEFT JOIN 선택을 쓴다.
+        # ``--retry`` 만 미해소 큐를 조인해 대상을 고른다 — 나머지 경로는 자산 목록을 그대로 쓴다.
         if args.retry:
             asset_ids = _fetch_unresolved_asset_ids(db)
         elif args.all:

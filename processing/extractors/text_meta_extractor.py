@@ -37,7 +37,7 @@ class EmbeddingTextMeta(TypedDict):
 def _get_tokenizer(model_name: str) -> PreTrainedTokenizerBase:
     """토큰 수 세기용 **토크나이저만** 로드(가중치 X). 프로세스 캐시.
 
-    종전엔 ``get_embedding_model``(SentenceTransformer 전체·GB)을 로드해 그 ``.tokenizer`` 만 썼다.
+    ⚠️ 토크나이저만 필요할 때 임베딩 모델 전체를 올리면 안 된다 — 수 GB 를 잡아먹는다.
     임베딩이 원격(st_api=bge-m3)이면 로컬 임베딩 모델은 애초에 없고, 로컬(st)이어도 토큰 수 하나
     세자고 GB 가중치를 올릴 이유가 없다 → ``AutoTokenizer`` 로 토크나이저만 로드해 컨테이너 메모리·
     콜드로드를 줄인다. 무거운 import 는 함수 내부(모듈 import 시 transformers 미로딩)."""
@@ -70,14 +70,22 @@ def _detect_language_from_counts(*, hangul_count: int, latin_count: int) -> str:
     한글 쪽 기준을 더 낮게 잡는다 — 한글 문서에도 영문 용어가 흔히 섞여 한글 비중이
     낮게 나오기 때문이다. 양쪽 다 기준에 못 미치면 판별 불가로 둔다.
 
+    Args:
+        hangul_count: 한글 글자 수.
+        latin_count: 라틴 문자 수.
+
     Returns:
-        언어 코드 또는 판별 불가 표시.
+        언어 코드 또는 판별 불가 표시. **억지로 하나를 고르지 않는다** — 잘못된 언어 라벨은
+        형태소 분석·검색 경로를 엉뚱한 쪽으로 보낸다.
     """
     total_letters = hangul_count + latin_count
     if total_letters == 0:
         return "unknown"
+    # 한글은 3할만 넘어도 한국어로 본다 — 한글 문서에 영문 용어·고유명사가 섞이는 것이 흔해,
+    # 절반을 요구하면 실제 한국어 문서가 판별 불가로 떨어진다.
     if (hangul_count / total_letters) >= 0.3:
         return "ko"
+    # 영문은 절반을 요구한다 — 한글이 이미 3할 미만이라 여기 오면 대체로 영문 문서다.
     if (latin_count / total_letters) >= 0.5:
         return "en"
     return "unknown"

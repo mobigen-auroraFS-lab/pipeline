@@ -18,7 +18,7 @@ _PLAIN_KINDS = frozenset({MediaKind.TEXT.value, MediaKind.JSON.value})  # txt, j
 
 
 def _resolve_encoding() -> str:
-    """분류용 읽기 인코딩(069 B10·P2-12). 하드코딩 "utf-8" 대신 설정 인코딩을 쓴다 —
+    """분류용 읽기 인코딩. 하드코딩 대신 설정 인코딩을 쓴다 —
 
     extract(``data_loader``)가 ``cfg.encoding`` 으로 읽으므로, 분류 stage2 도 같은 인코딩으로 읽어야
     cp949 문서의 어휘 매칭이 어긋나지 않는다(utf-8 강제 시 글자 깨짐). 설정 미초기화(순수 단위 등)면
@@ -33,10 +33,20 @@ def _resolve_encoding() -> str:
 
 
 def extract_text_for_classification(file_path: str, modality: str, *, max_chars: int = _MAX_CHARS) -> str:
-    """분류용 텍스트(LLM 없음). 실패는 빈 문자열로 흡수.
+    """분류 단서로 쓸 텍스트를 뽑는다 — LLM 을 쓰지 않는다.
 
-    video/audio/unknown 은 빈 문자열을 반환 — stage1 시그니처·파일명·stage3 LLM 이 처리.
-    분류 단계에서 LLM 캡션/요약을 쓰지 않는 이유: 비용·지연 없이 결정론적 판정 우선.
+    여기서 캡션·요약을 만들면 분류 한 건마다 모델을 돌리게 된다. 앞 단계는 **싸고 결정적**
+    이어야 하므로 파일에서 바로 읽을 수 있는 것만 쓴다.
+
+    Args:
+        file_path: 대상 파일.
+        modality: 파일 종류. **영상·오디오·미상은 빈 문자열**을 돌려준다 — 그런 파일은
+            시그니처·파일명·마지막 LLM 단계가 맡는다.
+        max_chars: 읽을 최대 글자 수. 앞부분만 봐도 도메인 단서는 충분하다.
+
+    Returns:
+        추출한 텍스트. **실패는 빈 문자열로 흡수한다** — 글자를 못 읽는 것이 분류 실패로
+        번지면 안 된다.
     """
     if modality in ALLOWED_TEXT_META_FILE_KINDS:
         return _document_text(file_path, modality, max_chars)
@@ -91,8 +101,13 @@ def _document_text(file_path: str, modality: str, max_chars: int) -> str:
 def _ocr_image(file_path: str, max_chars: int) -> str:
     """이미지에서 글자를 읽어 낸다(분류 단서용).
 
-    OCR 은 느리고 실패도 잦아 **예외를 삼키고 빈 문자열**을 돌려준다 — 글자를 못 읽는 것이
-    분류 실패로 번지면 안 된다.
+    Args:
+        file_path: 이미지 경로.
+        max_chars: 읽을 최대 글자 수.
+
+    Returns:
+        읽어 낸 글자. **어떤 실패도 빈 문자열로 흡수한다** — 글자 인식은 느리고 실패도
+        잦은데, 그것이 분류 실패로 번지면 안 된다.
     """
     try:
         import pytesseract
