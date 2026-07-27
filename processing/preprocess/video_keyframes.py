@@ -36,6 +36,7 @@ class VideoBasicMeta(TypedDict):
 
 
 def _to_seconds(timecode: object) -> float:
+    """타임코드 객체·문자열·숫자를 초 단위 실수로 통일한다(라이브러리마다 형태가 다르다)."""
     if hasattr(timecode, "get_seconds"):
         return float(timecode.get_seconds())  # type: ignore[no-any-return]
     # scenedetect 버전 차이를 고려한 안전장치
@@ -77,6 +78,14 @@ def _read_scene_mid_frame(
     start_sec: float,
     end_sec: float,
 ) -> tuple[float, object]:
+    """장면 구간의 **가운데 프레임**을 읽는다.
+
+    시작 프레임을 쓰지 않는 이유: 장면 전환 직후에는 화면이 흐리거나 자막만 있는 경우가
+    많아 그 장면을 대표하지 못한다.
+
+    Returns:
+        ``(시각(초), 프레임)``.
+    """
     frame_sec = start_sec + max(0.0, (end_sec - start_sec) / 2.0)
     cap.set(cv2.CAP_PROP_POS_MSEC, frame_sec * 1000.0)
     ok, frame = cap.read()

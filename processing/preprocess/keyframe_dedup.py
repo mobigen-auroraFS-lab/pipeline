@@ -62,6 +62,7 @@ class KeyframeDedupConfig:
     recent_window: int = DEFAULT_RECENT_WINDOW
 
     def __post_init__(self) -> None:
+        """설정 값이 허용 범위인지 확인한다 — 잘못된 값은 생성 시점에 막는다."""
         if self.compare_mode not in _COMPARE_MODES:
             raise ValueError(
                 f"compare_mode 는 {sorted(_COMPARE_MODES)} 중 하나여야 함: {self.compare_mode!r}"

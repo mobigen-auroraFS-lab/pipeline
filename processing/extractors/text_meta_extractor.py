@@ -47,6 +47,15 @@ def _get_tokenizer(model_name: str) -> PreTrainedTokenizerBase:
 
 
 def count_tokens(text: str, *, model_name: str) -> int:
+    """모델 기준 토큰 수를 센다 — 청크 크기를 정할 때 글자 수 대신 이 값을 본다.
+
+    Args:
+        text: 대상 텍스트.
+        model_name: 토크나이저를 고를 기준 모델.
+
+    Returns:
+        토큰 개수.
+    """
     # model_name = 활성 임베딩 모델(호출부가 active_embed_model 로 넘김) — 토큰 수를 임베딩과 정합.
     if not text:
         return 0
@@ -56,9 +65,14 @@ def count_tokens(text: str, *, model_name: str) -> int:
 
 
 def _detect_language_from_counts(*, hangul_count: int, latin_count: int) -> str:
-    # 글자 종류 비율 기반 휴리스틱(사전·LLM 없이 결정적). 한글은 라틴보다 낮은 임계(0.3)를
-    # 쓴다 — 한글 문서도 영문 용어가 흔히 섞여 한글 비중이 낮게 나오기 때문.
-    # 라틴 0.5 미만이고 한글도 0.3 미만이면 판별 불가로 unknown.
+    """글자 종류 비율로 언어를 판별한다(사전·모델 없이 결정적).
+
+    한글 쪽 기준을 더 낮게 잡는다 — 한글 문서에도 영문 용어가 흔히 섞여 한글 비중이
+    낮게 나오기 때문이다. 양쪽 다 기준에 못 미치면 판별 불가로 둔다.
+
+    Returns:
+        언어 코드 또는 판별 불가 표시.
+    """
     total_letters = hangul_count + latin_count
     if total_letters == 0:
         return "unknown"
@@ -70,6 +84,7 @@ def _detect_language_from_counts(*, hangul_count: int, latin_count: int) -> str:
 
 
 def _count_sentences(text: str) -> int:
+    """문장 수를 대략 센다(마침표 계열 구두점 기준 — 정확한 문장 분리가 목적이 아니다)."""
     if not text.strip():
         return 0
     parts = re.split(r"[.!?]+|\n+", text)
@@ -85,6 +100,22 @@ def extract_text_meta(
     # 기본은 토큰 수 세기용 폴백 — 운영 호출부(text_skill)는 active_embed_model 을 명시 주입한다.
     embedding_model_name: str = "BM-K/KoSimCSE-roberta-multitask",
 ) -> EmbeddingTextMeta:
+    """텍스트 파일에서 임베딩·검색에 쓸 메타를 뽑는다(길이·언어·문장 수·청크 등).
+
+    Args:
+        file_path: 대상 파일.
+        file_kind: 파일 종류(읽기 방식을 정한다).
+        encoding: 텍스트 인코딩.
+        chunk_size: 청크 하나의 최대 토큰 수.
+        embedding_model_name: **토큰 수를 셀 기준** 모델. 임베딩을 만들지는 않는다 —
+            운영 호출부는 실제 사용 모델을 명시로 넘겨 청크 크기를 맞춘다.
+
+    Returns:
+        메타 dict.
+
+    Raises:
+        FileNotFoundError: 파일이 없을 때.
+    """
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(str(path))

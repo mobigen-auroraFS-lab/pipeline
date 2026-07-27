@@ -16,6 +16,7 @@ _MAX_TEXT = 4000  # 프롬프트에 포함할 텍스트 최대 길이 — LLM �
 
 
 def _build_prompt(labels: list[str]) -> str:
+    """후보 라벨 목록을 넣어 분류 프롬프트를 만든다(목록 밖 답은 호출부가 버린다)."""
     # 프롬프트 끝에 '\n\n텍스트:\n' 를 두어 classify() 가 text 를 직접 이어 붙인다.
     opts = " 또는 ".join(labels)
     return (

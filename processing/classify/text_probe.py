@@ -46,6 +46,19 @@ def extract_text_for_classification(file_path: str, modality: str, *, max_chars:
 
 
 def _document_text(file_path: str, modality: str, max_chars: int) -> str:
+    """분류 판단에 쓸 텍스트를 파일에서 뽑는다(앞부분만).
+
+    추출 단계와 **같은 인코딩 규칙**을 쓴다 — 다르면 같은 문서인데 분류와 저장이 서로
+    다른 글자를 보게 된다.
+
+    Args:
+        file_path: 대상 파일.
+        modality: 파일 종류(어떻게 읽을지 정한다).
+        max_chars: 읽을 최대 글자 수.
+
+    Returns:
+        추출된 텍스트. 읽기에 실패하면 빈 문자열(분류를 멈추지 않는다).
+    """
     enc = _resolve_encoding()  # extract 와 동일 인코딩(B10) — cp949 문서 stage2 어휘 매칭 정합.
     if modality in _PLAIN_KINDS:
         try:
@@ -76,6 +89,11 @@ def _document_text(file_path: str, modality: str, max_chars: int) -> str:
 
 
 def _ocr_image(file_path: str, max_chars: int) -> str:
+    """이미지에서 글자를 읽어 낸다(분류 단서용).
+
+    OCR 은 느리고 실패도 잦아 **예외를 삼키고 빈 문자열**을 돌려준다 — 글자를 못 읽는 것이
+    분류 실패로 번지면 안 된다.
+    """
     try:
         import pytesseract
         from PIL import Image

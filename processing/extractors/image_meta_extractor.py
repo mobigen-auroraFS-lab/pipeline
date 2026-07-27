@@ -21,6 +21,7 @@ class ImageMeta(TypedDict):
 
 
 def _to_hex(rgb: tuple[int, int, int]) -> str:
+    """RGB 삼원색을 ``#rrggbb`` 문자열로 바꾼다(대표색을 메타에 담을 형태)."""
     return "#{:02x}{:02x}{:02x}".format(*rgb)
 
 

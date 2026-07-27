@@ -58,6 +58,7 @@ def _fetch_domain_label(db: PostgresUtil, asset_id: str) -> str:
     """
 
     def _run(conn: Connection[Any]) -> str:
+        """트랜잭션 안에서 도메인 라벨 한 건을 읽는다."""
         with conn.cursor() as cur:
             cur.execute("SELECT domain_label FROM asset WHERE asset_id = %s LIMIT 1", (asset_id,))
             row = cur.fetchone()
@@ -75,6 +76,7 @@ def _fetch_registered_asset_ids(db: PostgresUtil) -> list[str]:
     """
 
     def _run(conn: Connection[Any]) -> list[str]:
+        """트랜잭션 안에서 대상 자산 id 를 모아 온다."""
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -141,6 +143,7 @@ def _fetch_unresolved_asset_ids(db: PostgresUtil) -> list[str]:
     """
 
     def _run(conn: Connection[Any]) -> list[str]:
+        """트랜잭션 안에서 재시도 대상 조회를 위임한다."""
         return fetch_unresolved_asset_ids(conn)
 
     return db.execute_in_transaction(_run, idempotent=True)
@@ -175,6 +178,7 @@ def _record_resolution(
         reason = None
     try:
         def _run(conn: Connection[Any]) -> None:
+            """큐 한 행만 갱신한다 — 관계 저장과 **다른 트랜잭션**이라 서로 롤백시키지 않는다."""
             upsert_resolution(conn, aid, status=status, attempts=next_attempts, reason=reason)
 
         db.execute_in_transaction(_run, idempotent=False)
@@ -186,6 +190,7 @@ def _fetch_attempts(db: PostgresUtil, aid: str) -> int:
     """자산의 현재 큐 attempts(없으면 0). decide_resolution_status 입력으로 쓴다."""
 
     def _run(conn: Connection[Any]) -> int:
+        """트랜잭션 안에서 누적 시도 횟수를 읽는다."""
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT attempts FROM relation_resolution WHERE asset_id = %s LIMIT 1", (aid,)
@@ -294,7 +299,14 @@ def run_relations(
 #   1) load_dotenv(.env.{env}, override=False)  2) init_settings(env): 필수 환경변수 검증+frozen 설정
 #   3) PostgresUtil() + `with db:`: 연결 풀+PG17 검증.  온프레미스 LLM 클라이언트는 propose 내부 첫 호출 시 지연 생성.
 def main() -> int:
-    """CLI: registered 자산에 대해 관계 제안 배치."""
+    """자산들에 대해 관계 제안 배치를 돌린다(명령행 진입점).
+
+    대상은 두 가지 — 기본은 **등록된 자산 전체**, ``--retry`` 를 주면 아직 관계를 못 만든
+    자산만 골라 다시 시도한다.
+
+    Returns:
+        0=성공.
+    """
     import argparse
     import json
 

@@ -35,6 +35,9 @@ _log = logging.getLogger(__name__)
 
 
 def _read_head(file_path: str, n: int = _HEAD_BYTES) -> bytes:
+    """파일 **앞부분만** 읽는다 — 분류 판단에는 앞머리로 충분하고, 큰 파일을 통째로
+    올리면 배치가 메모리에 걸린다.
+    """
     # 실패(권한·존재 없음)는 빈 bytes — stage1 은 모두 miss → stage2 로 자연스럽게 이행.
     try:
         with open(file_path, "rb") as f:

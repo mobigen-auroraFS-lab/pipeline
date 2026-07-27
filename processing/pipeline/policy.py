@@ -24,7 +24,11 @@ class PolicyViolation(Exception):
 
 class Constraint(Protocol):
     def check(self, pack: DomainPack, registry: StrategyRegistry) -> str | None:
-        """위반 시 사유 문자열, 통과 시 None."""
+        """정책 위반 여부를 판정한다.
+
+        Returns:
+            위반이면 **사람이 읽을 사유 문자열**, 통과면 ``None``.
+        """
         ...
 
 
@@ -41,7 +45,10 @@ class ForbidTag:
     tag: str
 
     def check(self, pack, registry) -> str | None:
-        # cross_asset 미검사 — 위 docstring 참조
+        """자산 단위 슬롯 전략들이 금지 태그를 갖고 있지 않은지 확인한다.
+
+        ⚠️ **자산 사이(cross-asset) 슬롯은 아직 보지 않는다** — 클래스 docstring 참조.
+        """
         for slot, name in pack.per_asset.items():
             if self.tag in registry.tags(slot, name):
                 return f"{slot}={name} 전략이 금지 태그 '{self.tag}' 보유"
@@ -60,6 +67,7 @@ class RequireTag:
     tag: str
 
     def check(self, pack, registry) -> str | None:
+        """지정 슬롯의 전략이 필수 태그를 갖고 있는지 확인한다(슬롯 자체가 없어도 위반)."""
         name = pack.per_asset.get(self.slot)
         if name is None:
             return f"슬롯 '{self.slot}' 미정의"

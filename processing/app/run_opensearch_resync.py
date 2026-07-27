@@ -37,6 +37,7 @@ from src.search.opensearch_sync import sync_all
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """명령행 옵션을 정의한다(환경·채널·인덱스·재생성 여부)."""
     p = argparse.ArgumentParser(
         description="PG → OpenSearch 전체 재색인 복구 도구 (PG 읽기 전용·재실행 멱등)"
     )
@@ -105,6 +106,17 @@ def format_report(report: dict[str, Any], *, doc_count: int | None = None) -> st
 # PG 는 SELECT 만(FR-004·헌법 6조). 위 run_resync 는 OS·DB 없이 단위 검증되는 순수 조립부다.
 # 무거운 의존(dotenv·settings·PostgresUtil·get_client→opensearch-py)은 실행 시에만 지연 import 한다.
 def main() -> int:
+    """PostgreSQL 의 자산을 OpenSearch 로 **전부 다시 색인**한다(복구 도구).
+
+    색인이 유실·손상됐거나 매핑을 바꿨을 때 쓴다. PG 는 읽기만 하고, 같은 자산을 다시
+    넣어도 덮어쓰므로 여러 번 돌려도 안전하다.
+
+    ⚠️ ``--recreate`` 를 주면 **인덱스를 지우고 다시 만든다** — 재색인이 끝날 때까지
+    검색 결과가 비어 보인다.
+
+    Returns:
+        0=성공.
+    """
     args = _build_parser().parse_args()
 
 
@@ -129,8 +141,11 @@ def main() -> int:
     db = PostgresUtil()
 
     def _resync_txn(conn: Any) -> dict[str, Any]:
-        # 선검사: 동기화 SELECT 의 avg(embedding) 집계는 pgvector>=0.5 의존 → 미달이면 재색인 전에
-        # 원인 분명한 오류로 중단(모호한 SQL 오류 회피). 그 뒤 읽기전용 전체 재동기화를 조립·실행.
+        """한 커넥션 안에서 사전 점검 → 전체 재색인을 수행한다.
+
+        확장 버전을 **먼저** 확인하는 이유: 조회 SQL 이 특정 버전 이상에서만 되는 집계를
+        쓰는데, 그냥 시작하면 한참 뒤 모호한 오류로 멈춘다.
+        """
         check_pgvector_version(conn)
         return run_resync(
             client, conn, channel=channel, index=index, recreate=args.recreate,

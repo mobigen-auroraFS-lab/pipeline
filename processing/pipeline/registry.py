@@ -27,14 +27,33 @@ class StrategyRegistry:
     """
 
     def __init__(self) -> None:
+        """빈 레지스트리를 만든다(슬롯 → 이름 → 전략 2단 사전)."""
         self._slots: dict[str, dict[str, _Entry]] = {}
 
     def register(self, slot: str, name: str, fn: Callable, *, tags: Iterable[str] = ()) -> None:
-        """전략 등록. 동일 (slot, name) 이 있으면 덮어쓴다."""
+        """전략을 슬롯에 등록한다.
+
+        Args:
+            slot: 어느 단계인지(``classify``·``extract`` 등).
+            name: 전략 이름. 팩이 이 이름으로 고른다.
+            fn: 실제 구현. 해당 슬롯의 계약(``contracts``)을 만족해야 한다.
+            tags: 이 전략의 성질(예: 외부 호출 여부). 정책 검사가 이 값을 본다.
+
+        같은 ``(slot, name)`` 을 다시 등록하면 **덮어쓴다** — 테스트가 가짜 전략으로
+        갈아끼울 때 쓰는 성질이다.
+        """
         self._slots.setdefault(slot, {})[name] = _Entry(fn, frozenset(tags))
 
     def resolve(self, slot: str, name: str) -> Callable:
-        """등록된 전략 Callable 반환. 미등록이면 KeyError."""
+        """등록된 전략을 찾아 돌려준다.
+
+        Returns:
+            전략 함수.
+
+        Raises:
+            KeyError: 없는 슬롯·이름일 때. **기본 전략으로 폴백하지 않는다** — 배선이
+                틀렸는데 다른 전략이 조용히 도는 것이 더 위험하다.
+        """
         try:
             return self._slots[slot][name].fn
         except KeyError as e:

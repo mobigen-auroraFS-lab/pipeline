@@ -50,6 +50,10 @@ _LOG = logging.getLogger("meta_extract.run_ingest")
 
 
 def _configure_logging() -> None:
+    """이 스크립트용 로거를 stderr 에 한 번만 붙인다(이미 있으면 그대로 둔다).
+
+    다시 붙이면 같은 줄이 여러 번 찍힌다.
+    """
     if _LOG.handlers:
         return
     h = logging.StreamHandler()

@@ -91,6 +91,12 @@ def _make_opensearch_indexer(*, db: PostgresUtil, settings: Any) -> Callable[[An
     cache: dict[str, Any] = {}  # 첫 성공 셋업 후 client·index_asset·channel 을 담아 배치 내 재사용
 
     def index(asset_id: Any) -> None:
+        """자산 하나를 검색 색인에 반영한다(적재 직후 훅).
+
+        토글이 꺼져 있으면 아무 것도 하지 않고, 색인 실패도 **삼킨다** — 검색 색인 문제가
+        적재 자체를 실패시키면 안 되기 때문이다(복구 도구로 나중에 다시 넣을 수 있다).
+        클라이언트는 캐시에 담아 배치 안에서 재사용한다.
+        """
         if not enabled:
             return  # off(기본) — OpenSearch 코드 미접촉, 기존 동작 불변
         try:

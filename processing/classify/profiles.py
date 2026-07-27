@@ -53,7 +53,9 @@ class DomainProfileProvider(Protocol):
     cascade 엔진·테스트는 수정 불필요.
     """
 
-    def all_profiles(self) -> list[DomainProfile]: ...
+    def all_profiles(self) -> list[DomainProfile]:
+        """등록된 프로파일 전체를 돌려준다."""
+        ...
 
 
 # 프로세스 전역 등록(import 부수효과; pipeline.builtins.register_defaults 패턴과 동형).
@@ -62,6 +64,11 @@ DOMAIN_PROFILES: dict[str, DomainProfile] = {}
 
 
 def register_profile(profile: DomainProfile) -> None:
+    """도메인 프로파일을 전역 목록에 등록한다.
+
+    각 도메인 모듈을 import 하는 것만으로 등록이 일어난다(import 부수효과) — 그래서
+    프로파일을 추가하려면 **그 모듈이 import 되는지**부터 확인해야 한다.
+    """
     # 같은 domain 키로 재등록하면 덮어쓴다 — 테스트에서 mock 프로파일 주입 시 활용 가능.
     DOMAIN_PROFILES[profile.domain] = profile
 
@@ -70,4 +77,5 @@ class RegistryProvider:
     """A 단계 provider — 코드로 등록된 프로파일 반환. B 단계에서 DB provider 로 교체."""
 
     def all_profiles(self) -> list[DomainProfile]:
+        """코드로 등록된 프로파일을 그대로 돌려준다(추후 DB 조회로 교체할 자리)."""
         return list(DOMAIN_PROFILES.values())

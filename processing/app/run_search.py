@@ -54,6 +54,7 @@ def _run(
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """명령행 옵션을 정의한다(환경·질의·모달리티·개수)."""
     parser = argparse.ArgumentParser(description="하이브리드 검색 (asset_* 인덱스)")
     parser.add_argument("--env", choices=["dev", "prod"], default="dev")
     parser.add_argument("--query", required=True, help="검색 질의(한국어)")
@@ -69,6 +70,14 @@ def _build_parser() -> argparse.ArgumentParser:
 # 런타임 순서(run_ingest 와 동일): 1) load_dotenv(.env.{env}, override=False) →
 # 2) init_settings(env)(필수 환경변수 검증) → 3) 검색 실행. LLM/임베딩 클라이언트는 첫 사용 시 지연 초기화.
 def main() -> int:
+    """명령행에서 검색을 실행해 결과를 출력한다.
+
+    모달리티 오타는 **설정을 읽기 전에** 걸러낸다 — 불필요한 DB 초기화 없이 바로
+    사용법을 보여주기 위해서다.
+
+    Returns:
+        0=성공.
+    """
 
     from src.config.bootstrap import bootstrap_env
 

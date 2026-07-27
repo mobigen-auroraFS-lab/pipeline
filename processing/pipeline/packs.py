@@ -40,6 +40,7 @@ class DomainPack:
     policy: str                     # POLICIES 키(policy.py 참조)
 
     def __post_init__(self) -> None:
+        """생성 직후 슬롯 구성이 온전한지 확인한다 — 빠진 슬롯은 실행 도중이 아니라 여기서 드러난다."""
         # 얕은 동결 해소: 입력 매핑을 복사 후 읽기전용 뷰로 재바인딩(frozen 이라 object.__setattr__).
         object.__setattr__(self, "per_asset", MappingProxyType(dict(self.per_asset)))
         object.__setattr__(self, "cross_asset", MappingProxyType(dict(self.cross_asset)))

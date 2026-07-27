@@ -12,6 +12,7 @@ from processing.skills.meta_split import split_core_ext
 
 
 def _extract_text_meta(ctx: ExtractContext) -> AssetRecord:
+    """텍스트 자산의 추출 슬롯 구현 — 레지스트리에 이 이름으로 등록된다."""
     # 무거운 import(추출/요약)는 함수 내부 — 디스패처 import 시 미로딩.
     # 모든 LLM 은 설정된 단일 온프레미스 엔드포인트를 사용한다(외부 LLM 미사용).
     from processing.extractors.text_meta_extractor import extract_text_meta

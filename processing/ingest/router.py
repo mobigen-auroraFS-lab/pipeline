@@ -35,7 +35,16 @@ class RouteResult:
 
 
 def route_file(file_path: str | Path, *, domain: str = "general") -> RouteResult:
-    """단일 파일의 라우팅 판정."""
+    """파일 하나를 어떤 경로로 처리할지 판정한다(모달리티·도메인·처리 가능 여부).
+
+    Args:
+        file_path: 대상 파일.
+        domain: 기본 도메인. 판정으로 바뀔 수 있다.
+
+    Returns:
+        라우팅 결과. **파일이 없거나 종류를 알 수 없어도 예외를 올리지 않고** 사유를 담아
+        돌려준다 — 배치가 파일 하나 때문에 멈추지 않게 하려는 것이다.
+    """
     p = Path(file_path)
     if not p.is_file():
         return RouteResult(str(file_path), MediaKind.UNKNOWN.value, domain, False, REASON_MISSING)

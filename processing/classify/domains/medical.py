@@ -24,6 +24,10 @@ _FHIR_RE = re.compile(r'"resourceType"\s*:\s*"([A-Za-z]+)"')
 
 
 def _decode(head: bytes) -> str:
+    """바이트 앞부분을 텍스트로 푼다(깨지는 글자는 대체 문자로 넘긴다).
+
+    시그니처 검사용이라 완벽한 디코딩이 목적이 아니다 — 예외로 멈추지 않는 것이 중요하다.
+    """
     # BOM(﻿) 제거 후 앞 공백 트리밍 — HL7 'MSH|' startswith 판별을 위해 필요.
     return head.decode("utf-8", errors="ignore").lstrip("﻿").lstrip()
 

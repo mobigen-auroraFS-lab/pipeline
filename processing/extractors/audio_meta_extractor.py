@@ -21,9 +21,19 @@ class AudioMeta(TypedDict):
 
 
 def extract_audio_meta(file_path: str) -> AudioMeta:
-    # [확인 필요 사항·리뷰 🟡5] sf.info().duration 은 헤더 frame 수 기반 — WAV/FLAC 등 정적 컨테이너는
-    # 실측(sf.read)과 동일하나, 헤더 frame 이 부정확할 수 있는 일부 스트리밍/VBR 포맷에선 미세 차이 가능.
-    # 현 파이프라인 오디오는 정적 파일 위주라 실해 없다고 판단(포맷 확장 시 재검토).
+    """오디오 파일의 기본 메타(길이·샘플레이트·채널 등)를 읽는다.
+
+    **헤더만 읽는다** — 전체를 디코딩하면 긴 파일에서 배치가 느려진다.
+
+    Args:
+        file_path: 대상 파일.
+
+    Returns:
+        메타 dict.
+
+    ⚠️ 길이는 헤더의 프레임 수에서 계산한다. 정적 파일에서는 실측과 같지만, 헤더가
+    부정확할 수 있는 가변 비트레이트 포맷에서는 미세하게 어긋날 수 있다.
+    """
     info = sf.info(file_path)  # 헤더만 읽음(전체 디코드 없음 — P1-6)
     return {
         "duration": round(float(info.duration), 3),
