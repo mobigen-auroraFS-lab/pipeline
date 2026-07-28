@@ -7,11 +7,20 @@
 #   ./run.sh restart
 #   ./run.sh status
 #
+# 흐름에서의 위치: 이 스크립트가 **태스크 실행 환경의 출발점**이다. LocalExecutor 태스크는
+#   scheduler 의 자식이라 여기서 export 한 것을 그대로 물려받는다 — 앱 설정(POSTGRES_*·
+#   META_MODEL 등)도, 아래 macOS 회피책도 여기 없으면 태스크까지 닿지 않는다.
+#
 # 전제(최초 1회): 3레포 editable 설치 + (네이티브) psycopg2-binary·asyncpg 설치
 #   + 메타DB 생성(createdb "$AIRFLOW_META_DB").  상세 = 같은 폴더 README §네이티브 실행.
 #
-# PG 접속값: 환경변수 SQL_ALCHEMY_CONN / POSTGRES_* 가 있으면 그것을 쓰고,
-#   없으면 코어 .env.dev($CORE_DIR)에서 '서브셸로만' 읽어 조립(비밀번호 비하드코딩).
+# 비밀번호를 파일·로그에 남기지 않는다: PG 접속값은 환경변수가 있으면 그것을 쓰고, 없으면
+#   코어 .env.dev 를 **서브셸 안에서만** 읽어 조립한다(값이 이 셸로 새지 않는다).
+#
+# 깨지면 안 되는 것
+#   · conda.sh 소싱은 `set -u` 앞에 — 뒤로 옮기면 소싱 자체가 깨진다.
+#   · 기동은 프로세스그룹 리더로, 종료는 그룹째 — 안 그러면 태스크가 고아로 남는다.
+#   · start/stop 은 락으로 직렬화 — 동시에 돌면 pid 파일이 엇갈린다.
 # =============================================================================
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"       # .../deploy/airflow
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"                      # 파이프 레포 루트
@@ -32,7 +41,8 @@ RUN_DIR="${RUN_DIR:-$HOME/.dataflatform/pipeline}"          # pid·log
 if [[ -r "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
   # shellcheck disable=SC1091
   source "$CONDA_BASE/etc/profile.d/conda.sh"
-  # C6: activate 실패(환경 부재 등)를 조용히 넘기지 않는다 — 잘못된 시스템 python 으로 진행 방지.
+  # ⚠️ activate 실패를 조용히 넘기지 않는다 — 넘기면 시스템 python 으로 진행해
+  #    "왜 import 가 안 되지" 로 한참 헤매게 된다.
   conda activate "$CONDA_ENV" || { echo "오류: conda 환경 활성 실패($CONDA_ENV) — 환경 존재/이름 확인" >&2; exit 1; }
 else
   echo "경고: conda.sh 없음($CONDA_BASE) — CONDA_BASE 확인(사전 활성화된 env 로 진행)" >&2
@@ -65,6 +75,36 @@ export DATA_ROOT
 export WATCHER_INBOX_DIR="$DATA_ROOT/inbox"
 export WATCHER_ARCHIVE_DIR="$DATA_ROOT/archive"
 
+# ── macOS 전용 회피책(태스크 무한 정지) ──────────────────────────────────────
+# ⚠️ **macOS 에서만 건다.** 셋 다 Apple 프레임워크가 원인인 증상의 회피책이라 Linux 에는 의미가
+#    없고, 특히 no_proxy 는 **무해하지 않다** — 외부 프록시를 거쳐야 하는 배포에서 프록시를
+#    꺼 버린다. Linux 의 getproxies() 는 애초에 시스템 조회(_scproxy)를 하지 않는다.
+#
+# ⚠️ **여기서 export 해야 한다.** LocalExecutor 태스크는 scheduler 의 자식이라 부모 환경을
+#    물려받는다. DAG 파일 안에서 os.environ 에 넣으면 늦다 — BLAS 스레드 수는 numpy 가
+#    로드되는 순간 읽힌다.
+#
+# 증상(2026-07-28 실측·macOS): dag_process·dag_relations 태스크가 CPU 100% 로 60분 넘게 무진행.
+#   SIGTERM 도 안 먹었다(네이티브 호출 안에 갇혀 파이썬 신호 핸들러가 못 돈다 → SIGKILL 필요).
+#   같은 파일을 CLI 단독으로 돌리면 158초에 정상 완료 — 데이터가 아니라 실행 환경 문제다.
+#   스택 최심부는 둘 다 fork-safe 하지 않은 Apple 프레임워크였다:
+#     · dag_process   : numpy matmul → cblas_sgemm → dispatch_apply  (faster-whisper 멜 스펙트로그램)
+#     · dag_relations : _scproxy.get_proxies → SystemConfiguration   (HTTP 요청 전 프록시 조회)
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  # Accelerate(BLAS)의 dispatch_apply 병렬 분배를 끈다 — 멈추던 경로 자체를 안 타게 한다.
+  # ※ OMP_NUM_THREADS 는 **일부러 건드리지 않는다**. 멈춘 곳은 Accelerate 이지 OpenMP 가 아니고,
+  #   1 로 묶으면 정상 동작 중인 whisper 추론(ctranslate2)까지 직렬화돼 STT 가 크게 느려진다.
+  export VECLIB_MAXIMUM_THREADS=1
+  # HTTP 요청마다 macOS 시스템 프록시를 조회(_scproxy)하지 않게 한다. getproxies() 가 환경변수를
+  # 먼저 보고 결과가 비지 않으면 시스템 조회로 내려가지 않는다. 호출 대상이 전부 localhost
+  # (OpenSearch·온프레미스 LLM)라 프록시를 건너뛰어 잃는 것이 없다.
+  export no_proxy='*'
+  export NO_PROXY='*'
+  # 자식 프로세스에서 ObjC 런타임 초기화 검사를 끈다(위 두 증상과 같은 뿌리).
+  export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+  echo "  · macOS 회피책 적용: VECLIB_MAXIMUM_THREADS=1 · no_proxy=* · OBJC_DISABLE_INITIALIZE_FORK_SAFETY"
+fi
+
 # 메타DB 접속문자열(이미 있으면 그대로) — 없으면 POSTGRES_*/코어 .env.dev 에서 조립
 if [[ -z "${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN:-}" ]]; then
   AIRFLOW__DATABASE__SQL_ALCHEMY_CONN="$(
@@ -73,7 +113,7 @@ if [[ -z "${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN:-}" ]]; then
       # shellcheck disable=SC1091
       source "$CORE_DIR/.env.dev" >/dev/null 2>&1 || true
     fi
-    # C5: user·password 를 URL-인코딩(퍼센트)한다 — 특수문자(@ : / # 등) 비밀번호가 접속 URL 을 깨뜨리지
+    # ⚠️ user·password 를 URL-인코딩한다 — 특수문자(@ : / # 등) 비밀번호가 접속 URL 을 깨뜨리지
     #   않게(예 p@ss → p%40ss). host/port/db 는 자격증명이 아니라 그대로. conda python 으로 조립(shell 값 명시 전달).
     POSTGRES_USER="${POSTGRES_USER:-}" POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-}" \
     POSTGRES_HOST="${POSTGRES_HOST:-localhost}" POSTGRES_PORT="${POSTGRES_PORT:-5432}" \
@@ -93,7 +133,8 @@ mkdir -p "$RUN_DIR" "$WATCHER_INBOX_DIR" "$WATCHER_ARCHIVE_DIR"
 SVCS=(scheduler dag-processor api-server)
 
 # ── 유틸 ─────────────────────────────────────────────────────────────────────
-# C3: 동시 start/stop 직렬화용 원자 락 — mkdir 은 'create-or-fail' 이라 flock(macOS 부재) 대체로 안전.
+# 동시 start/stop 직렬화용 락. mkdir 을 쓰는 이유는 '있으면 실패'가 원자적이기 때문이다 —
+# flock 은 macOS 에 없다.
 _LOCK_DIR="$RUN_DIR/.lock"
 acquire_lock() {
   if ! mkdir "$_LOCK_DIR" 2>/dev/null; then
@@ -103,7 +144,7 @@ acquire_lock() {
   trap 'rmdir "$_LOCK_DIR" 2>/dev/null || true' EXIT   # 스크립트 종료 시 자동 해제
 }
 
-# C2: pid 가 살아있고 '진짜 우리 airflow' 인지 확인 — 서비스가 죽은 뒤 OS 가 그 pid 를 무관 프로세스에
+# ⚠️ pid 가 살아있는 것만으로는 부족하다 — 서비스가 죽은 뒤 OS 가 그 pid 를 무관 프로세스에
 #   재할당했을 때 '실행 중' 오인이나 stop 의 남의 프로세스 kill 을 막는다.
 _is_our_airflow() {
   local p="$1"
@@ -127,7 +168,7 @@ start_one() {
     *) echo "  알 수 없는 서비스: $name"; return 1 ;;
   esac
   if is_running "$name"; then printf '  = %-13s 이미 실행 중(pid %s)\n' "$name" "$(cat "$RUN_DIR/$name.pid")"; return 0; fi
-  # C1: nohup(SIGHUP 무시) + </dev/null(터미널 stdin 분리) + set -m(자기 프로세스그룹 리더로) 로 띄운다 —
+  # nohup(SIGHUP 무시) + </dev/null(터미널 stdin 분리) + set -m(자기 프로세스그룹 리더로) 로 띄운다 —
   #   터미널·SSH 종료(SIGHUP)에도 살아남고, 기록한 pid 가 곧 프로세스그룹 리더라 stop 이 그룹째 종료(C4)할 수 있다.
   #   set -m 은 job control 이므로 tty 가 필요(대화형 `./run.sh start`). tty 없는 비대화형(cron 등)에선 조용히
   #   생략되고 일반 백그라운드로 뜬다 — 그 경우 stop 이 단일 pid 로 폴백해 여전히 종료된다(자식 회수만 못함).
@@ -143,10 +184,12 @@ stop_one() {
   local pidf="$RUN_DIR/$name.pid" pid
   if [[ ! -f "$pidf" ]]; then printf '  - %-13s pid 없음(미기동?)\n' "$name"; return; fi
   pid="$(cat "$pidf")"
-  # C2: 살아있는 '우리 airflow' 가 아니면(종료됨 또는 재할당된 무관 pid) 파일만 정리하고 끝 — 남의 프로세스 kill 방지.
+  # 살아있는 '우리 airflow' 가 아니면(종료됨 또는 재할당된 무관 pid) 파일만 정리하고 끝낸다.
+  # ⚠️ 이 확인을 빼면 **남의 프로세스를 죽인다**.
   if ! _is_our_airflow "$pid"; then printf '  - %-13s 이미 종료(또는 무관 pid)\n' "$name"; rm -f "$pidf"; return; fi
   printf '  ▪ %-13s 종료(pid %s)…' "$name" "$pid"
-  # C4: 단일 pid 가 아니라 프로세스그룹(-pid)째 종료 — LocalExecutor 태스크·gunicorn 워커 등 자식까지 회수(고아 방지).
+  # ⚠️ 단일 pid 가 아니라 **프로세스그룹째** 종료한다 — LocalExecutor 태스크·gunicorn 워커 등
+  #    자식까지 회수해야 한다. 부모만 죽이면 태스크가 고아로 남아 계속 돈다.
   #   그룹 종료가 안 되는 구버전 pid(비-리더)면 단일 pid 로 폴백.
   kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
   for _ in $(seq 1 10); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
