@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
-from src.config.settings import active_embed_channel, active_embed_model, get_current_settings
 from processing.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
 from processing.skills.meta_split import split_core_ext
+from src.config.settings import active_embed_channel, active_embed_model, get_current_settings
 
 
 def _extract_audio_meta(ctx: ExtractContext) -> AssetRecord:
@@ -20,8 +20,8 @@ def _extract_audio_meta(ctx: ExtractContext) -> AssetRecord:
     계약: _embed_audio 는 반드시 같은 ctx 로 이 함수 실행 후 호출되어야 한다.
     """
     from processing.extractors.audio_meta_extractor import extract_audio_meta
-    from src.llm.text_summarizer import summarize_and_extract_keywords_from_audio
     from processing.preprocess.stt import transcribe_audio_local
+    from src.llm.text_summarizer import summarize_and_extract_keywords_from_audio
 
     file = ctx.file_path
     stt_result = transcribe_audio_local(file_path=file)

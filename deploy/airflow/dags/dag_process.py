@@ -81,9 +81,9 @@ def process_batch(**_context) -> dict[str, int]:
         갈래별 건수 dict. ⚠️ **원본 보고 객체가 아니라 개수만** 돌려준다 — 태스크 사이 값 전달
         저장소는 직렬화 가능한 값만 담을 수 있고, 자산 id 목록까지 넣으면 불필요하게 커진다.
     """
+    from processing.ingest.batch_runner import process_received_batch
     from src.config.settings import init_settings
     from src.database.postgres_util import PostgresUtil
-    from processing.ingest.batch_runner import process_received_batch
 
     # ⚠️ 설정을 **명시적으로 넘긴다** — 배치가 이것으로 색인기를 배선한다. 안 넘기면 색인 설정을
     # 못 읽어 색인이 말없이 꺼진다.
@@ -144,9 +144,9 @@ def archive_processed(**_context) -> int:
     Raises:
         RuntimeError: 인입·아카이브 경로 환경변수가 없을 때.
     """
+    from processing.ingest import archiver
     from src.config.settings import init_settings
     from src.database.postgres_util import PostgresUtil
-    from processing.ingest import archiver
 
     init_settings(os.environ.get("META_ENV", _DEFAULT_ENV))
     inbox = os.environ.get("WATCHER_INBOX_DIR")

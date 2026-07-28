@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import unittest
 
+from processing.ingest.status import AssetStatus
 from src.domain.status_vocab import (
     AccessTier,
     GraphEdgeStatus,
     RegistryFieldStatus,
     RelationResolutionStatus,
 )
-from processing.ingest.status import AssetStatus
 
 
 class StatusVocabSyncTest(unittest.TestCase):

@@ -31,8 +31,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from processing.classify.types import ClassificationResult
-from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 from processing.dispatch.types import AssetRecord, EmbeddingItem
+from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 
 _RUN = os.getenv("RUN_DB_E2E") == "1"
 _ENV = Path(__file__).resolve().parents[1] / ".env.dev"

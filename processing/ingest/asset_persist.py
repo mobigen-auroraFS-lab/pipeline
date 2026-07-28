@@ -21,11 +21,11 @@ from typing import Any
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from processing.dispatch.types import AssetRecord
+from processing.ingest.status import AssetStatus, InvalidTransitionError, fetch_status, set_status
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 from src.database.ids import uuid7
-from processing.dispatch.types import AssetRecord
 from src.file.file_type_defs import modality_of  # 저장할 때 큰 갈래로 좁히는 매핑
-from processing.ingest.status import AssetStatus, InvalidTransitionError, fetch_status, set_status
 
 
 def find_registered_asset_by_hash(conn: Connection[Any], file_hash: str) -> uuid.UUID | None:

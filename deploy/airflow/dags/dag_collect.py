@@ -80,11 +80,11 @@ def collect_inbox(**_context) -> int:
     """
     from datetime import date
 
-    from src.config.settings import init_settings
-    from src.database.postgres_util import PostgresUtil
     from processing.ingest import archiver
     from processing.ingest.collector import collect_files
     from processing.ingest.pipeline_steps import REASON_DUPLICATE, collect_file
+    from src.config.settings import init_settings
+    from src.database.postgres_util import PostgresUtil
 
     init_settings(os.environ.get("META_ENV", _DEFAULT_ENV))
     inbox = os.environ.get("WATCHER_INBOX_DIR")

@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import logging
 
-from src.config.settings import active_embed_channel, active_embed_model, get_current_settings
 from processing.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
 from processing.skills.meta_split import split_core_ext
+from src.config.settings import active_embed_channel, active_embed_model, get_current_settings
 
 _CHANNEL_CLIP = "clip"
 _LOG = logging.getLogger("meta_extract.video_skill")
@@ -28,14 +28,14 @@ def _extract_video_meta(ctx: ExtractContext) -> AssetRecord:
     ``clip_image_embedding`` 은 meta 의 keyframes 항목에서도 제거하고 stash 에만 보존한다.
     계약: _embed_video 는 반드시 같은 ctx 로 이 함수 실행 후 호출되어야 한다.
     """
-    from src.embedders.video_embedder import embed_video_keyframes_clip
-    from src.llm.image_summarizer import summarize_image_caption_keywords_objects_from_jpeg_bytes
-    from src.llm.video_summarizer import summarize_video_from_scene_results
     from processing.preprocess.keyframe_dedup import KeyframeDedupConfig
     from processing.preprocess.video_keyframes import (
         extract_video_basic_meta,
         extract_video_representative_frame_bytes,
     )
+    from src.embedders.video_embedder import embed_video_keyframes_clip
+    from src.llm.image_summarizer import summarize_image_caption_keywords_objects_from_jpeg_bytes
+    from src.llm.video_summarizer import summarize_video_from_scene_results
 
     cfg = ctx.settings or get_current_settings()
     file = ctx.file_path
@@ -134,9 +134,9 @@ def _embed_video(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
     Raises:
         RuntimeError: 같은 문맥으로 추출을 먼저 돌리지 않았을 때.
     """
+    from processing.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding
     from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME
     from src.embedders.text_embedder import embed_texts_for, pad_embedding_to_storage_dim
-    from processing.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding
 
     cfg = ctx.settings or get_current_settings()
     channel = active_embed_channel(cfg)

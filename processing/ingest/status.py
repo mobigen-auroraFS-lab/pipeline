@@ -22,7 +22,10 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 
 
-class AssetStatus(str, Enum):
+# ⚠️ ``StrEnum`` 으로 바꾸지 않는다(UP042 억제) — ``str(...)`` 결과가 달라진다.
+#    지금은 ``"AssetStatus.RECEIVED"``, StrEnum 이면 ``"received"`` 다. 로그·f-string 에
+#    그대로 찍히는 값이라 바꾸려면 소비처를 훑고 별건으로 다뤄야 한다(DB 바인딩은 양쪽 동일).
+class AssetStatus(str, Enum):  # noqa: UP042
     """``asset.status`` CHECK 제약과 동일한 값 (v160).
 
     정상 경로: received → routing → classifying → extracting → registered.

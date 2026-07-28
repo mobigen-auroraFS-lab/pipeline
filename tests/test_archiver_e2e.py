@@ -53,10 +53,10 @@ class TestArchiverE2E(unittest.TestCase):
                 cur.execute("DELETE FROM asset WHERE asset_id=%s", (aid,))
 
     def _registered(self, fs_path: str, ids: list[str]) -> str:
-        from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
         from processing.dispatch.types import AssetRecord, EmbeddingItem
         from processing.ingest.asset_persist import create_asset, finalize_asset
         from processing.ingest.status import AssetStatus, set_status
+        from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 
         v = [0.0] * FIX_EMBEDDING_DIMENSION
         v[0] = 0.5

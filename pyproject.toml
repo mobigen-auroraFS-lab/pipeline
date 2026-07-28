@@ -27,7 +27,15 @@ include = ["processing*"]
 
 [tool.ruff]
 line-length = 100
-lint.ignore = ["E501"]  # 코어 레포 관례와 동일(한국어 주석 다수·E501 무시)
+# ⚠️ 규칙 집합을 **명시 선택**한다 — ruff 기본값에 기대면 버전이 올라가며 기본이 확장될 때
+#    무관한 PR 이 통째로 red 가 된다(0.16 에서 실제로 발생: I001·RET·FURB·PLR 이 한꺼번에 유입).
+#    코어 레포와 같은 집합을 쓴다(3레포 동일 기준).
+lint.select = ["E", "W", "F", "I", "UP", "B", "C4"]
+lint.ignore = ["E501", "B008"]  # E501=한국어 주석 다수 · B008=기본값 호출 관례(코어와 동일)
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F401", "F811"]      # 픽스처 재수출·오버라이드 관례
+"__init__.py" = ["F401"]          # 패키지 재수출
 
 [tool.ruff.lint.isort]
 known-first-party = ["processing", "src"]  # 파이프라인(processing)·코어(src) 모두 first-party 정렬

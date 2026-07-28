@@ -9,9 +9,9 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 from processing.dispatch.types import ExtractContext
 from processing.skills import video_skill
+from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 
 
 def _cfg() -> mock.Mock:

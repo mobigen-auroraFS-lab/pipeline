@@ -24,10 +24,10 @@ import os
 import unittest
 from unittest import mock
 
-from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME, FIX_EMBEDDING_DIMENSION
-from src.config.settings import _build_settings
 from processing.dispatch.types import AssetRecord, ExtractContext
 from processing.skills import audio_skill, image_skill, text_skill, video_skill
+from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME, FIX_EMBEDDING_DIMENSION
+from src.config.settings import _build_settings
 
 # _build_settings 가 _require_env* 로 읽는 필수 env 최소 집합(값은 형식만 맞으면 됨).
 # TEXT_EMBED_MODEL 은 모델 라우팅 검증을 위해 실제 KoSimCSE 값으로 고정한다.

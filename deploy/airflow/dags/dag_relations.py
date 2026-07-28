@@ -71,9 +71,9 @@ def propose_relations(**_context) -> dict[str, int]:
         성공·실패 건수 dict. 대상이 0건이면 배치를 부르지 않고 바로 0을 돌려준다.
     """
     from processing.app.run_relations import run_relations
+    from processing.ingest.batch_runner import scan_unresolved_assets
     from src.config.settings import init_settings
     from src.database.postgres_util import PostgresUtil
-    from processing.ingest.batch_runner import scan_unresolved_assets
 
     init_settings(os.environ.get("META_ENV", _DEFAULT_ENV))
     db = PostgresUtil()

@@ -17,10 +17,10 @@ import os
 import unittest
 from unittest import mock
 
-from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
-from src.config.settings import _build_settings
 from processing.dispatch.types import ExtractContext
 from processing.skills import video_skill
+from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
+from src.config.settings import _build_settings
 
 _REQUIRED_ENV = {
     "META_MODEL": "gemma",

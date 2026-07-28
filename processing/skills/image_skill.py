@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
-from src.config.settings import active_embed_channel, active_embed_model, get_current_settings
 from processing.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
 from processing.skills.meta_split import split_core_ext
+from src.config.settings import active_embed_channel, active_embed_model, get_current_settings
 
 _CHANNEL_CLIP = "clip"
 
@@ -23,11 +23,11 @@ def _extract_image_meta(ctx: ExtractContext) -> AssetRecord:
     CLIP 이미지 벡터를 ``ctx.scratch["clip_vec"]`` 에 저장해 _embed_image 에서 재사용한다
     — CLIP 추론을 두 번 실행하지 않기 위한 핸드오프 계약이다.
     """
+    from processing.extractors.image_meta_extractor import extract_image_meta
     from src.embedders.image_embedder import (
         clip_zero_shot_ko_meta_items,
         zero_shot_tag_image_korean_clip,
     )
-    from processing.extractors.image_meta_extractor import extract_image_meta
     from src.llm.image_summarizer import summarize_image_caption_keywords_objects
 
     cfg = ctx.settings or get_current_settings()
@@ -78,9 +78,9 @@ def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
     Raises:
         RuntimeError: 같은 문맥으로 추출을 먼저 돌리지 않았을 때.
     """
+    from processing.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding
     from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME
     from src.embedders.text_embedder import embed_texts_for, pad_embedding_to_storage_dim
-    from processing.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding
 
     cfg = ctx.settings or get_current_settings()
     channel = active_embed_channel(cfg)

@@ -29,7 +29,9 @@ from unittest import mock
 from processing.app import run_ingest as ri
 from processing.classify.types import ClassificationResult
 from processing.dispatch.types import AssetRecord
-from processing.ingest import pipeline_steps as ps  # 069 FR-E3: 수집·처리 스텝 정본(내부 seam patch 대상)
+from processing.ingest import (
+    pipeline_steps as ps,  # 069 FR-E3: 수집·처리 스텝 정본(내부 seam patch 대상)
+)
 from processing.ingest.router import RouteResult
 
 _EXISTING = uuid.UUID("018f0000-0000-7000-8000-000000000018")

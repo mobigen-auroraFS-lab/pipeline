@@ -15,11 +15,11 @@
 from __future__ import annotations
 
 from processing.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
-from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
 from processing.skills.audio_skill import _embed_audio, _extract_audio_meta
 from processing.skills.image_skill import _embed_image, _extract_image_meta
 from processing.skills.text_skill import _embed_text, _extract_text_meta
 from processing.skills.video_skill import _embed_video, _extract_video_meta
+from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
 
 
 class UnsupportedModalityError(ValueError):

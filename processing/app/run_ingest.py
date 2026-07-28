@@ -23,10 +23,6 @@ import logging
 import uuid
 from typing import Any
 
-from src.config.settings import get_current_settings
-from src.database.lineage_persist import record_lineage
-from src.database.postgres_util import PostgresUtil
-
 # ⚠️ 스텝의 정본은 ``pipeline_steps`` 다(계층이 뒤집히지 않게 아래로 내렸다). 여기서 다시
 # import 해 CLI 조립에 쓰고 **같은 이름으로 내보낸다** — 이 이름을 바꿔 끼우는 테스트가 있다.
 from processing.ingest.pipeline_steps import (
@@ -45,6 +41,9 @@ from processing.pipeline import (
     builtins as _builtins,  # noqa: F401 — DEFAULT_REGISTRY 등록 부수효과(import 계약)
 )
 from processing.pipeline.registry import DEFAULT_REGISTRY
+from src.config.settings import get_current_settings
+from src.database.lineage_persist import record_lineage
+from src.database.postgres_util import PostgresUtil
 
 _LOG = logging.getLogger("meta_extract.run_ingest")
 
@@ -162,8 +161,8 @@ def main() -> int:
     import argparse
     import json
 
-    from src.config.bootstrap import bootstrap_env
     from processing.ingest.collector import collect_files
+    from src.config.bootstrap import bootstrap_env
 
     parser = argparse.ArgumentParser(description="수집→라우팅→추출→등록 (asset_* 적재)")
     parser.add_argument("--env", choices=["dev", "prod"], default="dev")

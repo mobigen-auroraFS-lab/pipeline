@@ -16,8 +16,6 @@ from typing import Any
 
 from psycopg import Connection
 
-from src.database.postgres_util import PostgresUtil
-
 # builtins import 부수효과로 DEFAULT_REGISTRY 에 cross_asset 전략이 등록된다(register_defaults).
 # 슬롯 resolve(_resolve_cross_asset_slots)가 빈 레지스트리를 만나지 않도록 진입부에서 강제 로드.
 # run_ingest 와 동일 관용(별칭 _builtins) — 부수효과 import 라 직접 참조하지 않는다.
@@ -25,6 +23,7 @@ from processing.pipeline import builtins as _builtins  # noqa: F401 — DEFAULT_
 from processing.pipeline.cross_runner import run_cross_asset
 from processing.pipeline.packs import GENERAL_PACK, DomainPack, for_domain
 from processing.pipeline.registry import DEFAULT_REGISTRY, StrategyRegistry
+from src.database.postgres_util import PostgresUtil
 from src.relations.asset_candidates import EmbeddingKindFilter
 from src.relations.asset_entry import propose_relations_for_asset
 from src.relations.resolution_persist import (

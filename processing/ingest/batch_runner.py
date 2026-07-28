@@ -33,11 +33,11 @@ from typing import Any
 
 from psycopg import Connection
 
-from src.database.lineage_persist import record_lineage
 from processing.ingest.pipeline_steps import OsIndexFn, _make_opensearch_indexer, process_asset
 from processing.ingest.router import route_file
 from processing.ingest.status import AssetStatus, InvalidTransitionError, mark_failed
 from processing.pipeline.registry import DEFAULT_REGISTRY
+from src.database.lineage_persist import record_lineage
 
 _LOG = logging.getLogger("meta_extract.batch_runner")
 

@@ -5,7 +5,11 @@ import unittest
 from unittest import mock
 
 from processing.dispatch import dispatcher
-from processing.dispatch.dispatcher import UnsupportedModalityError, dispatch_embed, dispatch_extract_meta
+from processing.dispatch.dispatcher import (
+    UnsupportedModalityError,
+    dispatch_embed,
+    dispatch_extract_meta,
+)
 from processing.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
 from src.file.file_type_defs import ALLOWED_TEXT_META_FILE_KINDS, MediaKind
 

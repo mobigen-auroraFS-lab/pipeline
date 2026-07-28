@@ -21,12 +21,12 @@ from psycopg import Connection
 from processing.classify.aboutness import extract_and_persist_about
 from processing.classify.asset_topic import build_self_text, classify_asset_topic
 from processing.classify.types import ClassificationResult
-from src.database.lineage_persist import record_lineage
-from src.database.postgres_util import PostgresUtil
 from processing.dispatch.types import AssetRecord, ExtractContext
-from src.file.file_type_defs import modality_of  # 저장·기록에 쓸 큰 갈래 매핑
-from src.file.hashing import file_hash_and_size
-from processing.ingest.asset_persist import create_asset, finalize_asset, find_registered_asset_by_hash
+from processing.ingest.asset_persist import (
+    create_asset,
+    finalize_asset,
+    find_registered_asset_by_hash,
+)
 from processing.ingest.classification_persist import record_classification
 from processing.ingest.router import REASON_MISSING, RouteResult, route_file
 from processing.ingest.status import AssetStatus, set_status
@@ -34,6 +34,10 @@ from processing.pipeline import builtins as _builtins  # noqa: F401 — DEFAULT_
 from processing.pipeline.packs import for_domain
 from processing.pipeline.policy import validate as policy_validate
 from processing.pipeline.registry import DEFAULT_REGISTRY
+from src.database.lineage_persist import record_lineage
+from src.database.postgres_util import PostgresUtil
+from src.file.file_type_defs import modality_of  # 저장·기록에 쓸 큰 갈래 매핑
+from src.file.hashing import file_hash_and_size
 from src.registry.ext_meta_field_registry import validate_ext_meta
 
 REASON_DUPLICATE = "duplicate"

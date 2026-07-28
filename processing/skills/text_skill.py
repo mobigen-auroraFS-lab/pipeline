@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
-from src.config.settings import active_embed_channel, active_embed_model, get_current_settings
 from processing.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
 from processing.skills.meta_split import split_core_ext
+from src.config.settings import active_embed_channel, active_embed_model, get_current_settings
 
 
 def _extract_text_meta(ctx: ExtractContext) -> AssetRecord:
