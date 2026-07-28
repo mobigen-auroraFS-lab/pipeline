@@ -165,12 +165,12 @@ def _has_new_received(**context) -> bool:
 
 with DAG(
     dag_id="dag_collect",
-    description="인입 디렉터리 폴링 → received 자산화(030 G3·FR-001)",
+    description="인입 디렉터리 폴링 → received 자산화",
     schedule=_SCHEDULE,
     start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     catchup=False,            # 과거분 보충 금지 — 인입은 '지금 있는 파일'만 의미가 있다
     max_active_runs=1,        # 동시 1개 — 둘이 돌면 같은 파일을 함께 집어 중복 행이 생긴다
-    tags=["030", "pipeline", "collect"],
+    tags=["pipeline", "collect"],
 ):
     # 파일이 있을 때만 수집으로 진행 — 빈 인입에서 헛 스캔·DB 왕복을 피한다.
     gate_inbox = ShortCircuitOperator(task_id="gate_inbox_nonempty", python_callable=_inbox_nonempty)

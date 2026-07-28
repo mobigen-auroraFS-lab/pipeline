@@ -109,12 +109,12 @@ def _has_more_unresolved(**context) -> bool:
 
 with DAG(
     dag_id="dag_relations",
-    description="registered-미해소 자산 → graph_edge 관계 생성(030 G3·FR-004)",
+    description="registered-미해소 자산 → graph_edge 관계 생성",
     schedule=_SCHEDULE,
     start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     catchup=False,            # 과거분 보충 금지 — 무엇이 남았는지는 DB 상태가 정본이다
     max_active_runs=1,        # 동시 1개 — 둘이 돌면 같은 자산에 관계를 겹쳐 제안한다
-    tags=["030", "pipeline", "relations"],
+    tags=["pipeline", "relations"],
 ):
     propose = PythonOperator(task_id="propose_relations", python_callable=propose_relations)
     # 연속 드레인 — 이번에 뭔가 처리했으면 자기 자신을 다시 깨워 남은 것을 끝까지 소화한다.

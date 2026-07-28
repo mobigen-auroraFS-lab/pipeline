@@ -36,7 +36,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="PG → OpenSearch 전체 재색인 복구 도구 (PG 읽기 전용·재실행 멱등)"
     )
     p.add_argument("--env", choices=["dev", "prod"], default="dev")
-    p.add_argument("--channel", default=None, help="임베딩 채널(미지정=활성 프로파일·018)")
+    p.add_argument("--channel", default=None, help="임베딩 채널(미지정=활성 프로파일)")
     p.add_argument("--index", default=None, help="OpenSearch 인덱스(미지정=OPENSEARCH_INDEX)")
     p.add_argument(
         "--recreate",

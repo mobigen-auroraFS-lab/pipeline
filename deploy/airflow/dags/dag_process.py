@@ -163,12 +163,12 @@ def archive_processed(**_context) -> int:
 
 with DAG(
     dag_id="dag_process",
-    description="received(+고착) 자산 배치 처리 → registered(030 G3·FR-002·010)",
+    description="received(+고착) 자산 배치 처리 → registered",
     schedule=_SCHEDULE,
     start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     catchup=False,            # 과거분 보충 금지 — 무엇이 남았는지는 DB 상태가 정본이다
     max_active_runs=1,        # 동시 1개 — 모델을 올리는 프로세스가 둘이 되면 GPU 가 터진다
-    tags=["030", "pipeline", "process"],
+    tags=["pipeline", "process"],
 ):
     # 슬롯 풀로 한 번 더 묶는다 — 위 동시 실행 제한과 **이중 가드**(하나가 풀려도 남는다).
     process = PythonOperator(task_id="process_batch", python_callable=process_batch, pool=_POOL)
