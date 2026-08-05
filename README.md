@@ -72,6 +72,27 @@ python -m scripts.seed_topic_registry --env dev --apply    # ★ 닫힌 taxonomy
 
 레포 루트에 `.env.dev` 를 두면 `META_ENV=dev` 로 코어 설정 로더가 읽습니다. 필요한 변수 **이름만** 적습니다.
 
+### 🔴 필수 — 없으면 기동 시점에 실패합니다
+
+코어 설정 로더가 다음 11개를 **필수로 요구**합니다(미설정 시 `ValueError: 필수 환경변수 누락: <이름>`
+으로 즉시 중단 — 잘못된 설정으로 조용히 도는 것을 막는 fail-fast).
+
+```dotenv
+META_MODEL=              # 온프레미스 LLM 모델 이름
+ENCODING=utf-8
+CHUNK_SIZE=1000
+OVERLAP_SIZE=100
+SUMMARY_MAX_CHARS=500
+TOP_K_KEYWORDS=10
+TEXT_EMBED_MODEL=
+TEXT_EMBED_CHUNK_SIZE=512
+TEXT_EMBED_NORMALIZE=true
+OPENAI_BASE_URL=         # OpenAI 호환 엔드포인트(= 온프레미스 LLM 서버)
+OPENAI_API_KEY=
+```
+
+### 그 외
+
 | 구분 | 변수 |
 |---|---|
 | DB | `POSTGRES_HOST` · `POSTGRES_PORT` · `POSTGRES_DB` · `POSTGRES_USER` · `POSTGRES_PASSWORD` |
