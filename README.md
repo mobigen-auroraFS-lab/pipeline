@@ -70,7 +70,24 @@ python -m scripts.seed_topic_registry --env dev --apply    # ★ 닫힌 taxonomy
 
 ## 환경변수
 
-레포 루트에 `.env.dev` 를 두면 `META_ENV=dev` 로 코어 설정 로더가 읽습니다. 필요한 변수 **이름만** 적습니다.
+템플릿이 있습니다 — 복사해서 값만 채우면 됩니다:
+
+```bash
+cp .env.example .env.dev      # .env.dev 는 커밋되지 않습니다(.gitignore)
+```
+
+### 설정을 주는 두 가지 방법
+
+| 방법 | 어디에 | 우선순위 |
+|---|---|---|
+| **A. `.env.<환경>` 파일** | **실행하는 디렉터리** → 없으면 레포 루트 순으로 찾습니다 | 낮음 |
+| **B. 환경변수 직접 주입** | 배포·컨테이너·CI(`export` · `env_file:` · `env:`) | **높음**(A 를 덮어씁니다) |
+
+방법 B 로 파일 값을 그대로 올리려면:
+
+```bash
+set -a; . ./.env.dev; set +a
+```
 
 ### 🔴 필수 — 없으면 기동 시점에 실패합니다
 
@@ -150,3 +167,38 @@ tests/          단위 테스트
 - **학습 기반 방식을 쓰지 않습니다** — 사전학습 모델은 추론 전용입니다.
 - 도메인을 코드로 분기하지 않습니다 — 고정 뼈대 + **도메인 팩**이 스테이지 전략을 고릅니다.
 - 코드·주석·로그는 한국어로 작성합니다.
+
+## 트러블슈팅
+
+### `ValueError: 필수 환경변수 누락: META_MODEL`
+
+설정이 **하나도** 로드되지 않았다는 뜻입니다. 값이 틀린 게 아니라 대개 `.env` 파일을 못 찾은 것입니다.
+
+1. `.env.dev` 가 **실행하는 디렉터리** 또는 레포 루트에 있는지 확인하십시오(`cp .env.example .env.dev`).
+2. `--env dev` 로 실행했는지 확인하십시오 — `--env prod` 는 `.env.prod` 를 찾습니다.
+3. 그래도 안 되면 환경변수를 직접 주입하십시오: `set -a; . ./.env.dev; set +a`
+   (§환경변수 › 방법 B — 설치 방식과 무관하게 항상 동작합니다).
+
+### 코어를 못 찾습니다 (`ModuleNotFoundError: No module named 'src'`)
+
+이 레포는 코어(`dataplatform-core`)를 필요로 합니다. §설치 순서대로 **코어를 먼저** 설치하십시오.
+
+### 관계 생성 결과가 0건입니다
+
+**코어 레포에서** 닫힌 주제 분류체계 시드를 적재하지 않았을 때 나타납니다:
+`python -m scripts.seed_topic_registry --env dev --apply`
+
+### DAG 가 Airflow UI 에 보이지 않습니다
+
+DAG 파일이 import 단계에서 실패하면 목록에 나타나지 않습니다. 먼저 로컬에서 확인하십시오:
+`python -c "from airflow.dag_processing.dagbag import DagBag; b=DagBag(dag_folder='deploy/airflow/dags'); print(sorted(b.dag_ids), b.import_errors)"`
+(Airflow 3.1 이전은 `airflow.models.dagbag` 경로입니다.)
+
+## 이 레포에 대해
+
+이 레포는 **내부 개발 레포에서 생성된 공개용 사본**입니다. 소스 코드·DB 스키마·테스트만 담고 있고,
+기획·설계 문서는 포함하지 않습니다.
+
+- **직접 커밋·PR 은 반영되지 않습니다** — 내용은 릴리스마다 내부 레포에서 다시 생성되어 덮어써집니다.
+  Issues 는 비활성화돼 있습니다.
+- 문의는 과제 담당자에게 해주십시오.
