@@ -89,15 +89,22 @@ class TestChannelsParam(unittest.TestCase):
 
 class TestFindCandidates(unittest.TestCase):
     def test_maps_rows_to_str_id_candidates(self) -> None:
+        # keywords: 코어 SQL 이 ``COALESCE(m.ext_meta->>'keywords','') AS keywords`` 로 함께 뽑는
+        # 열이다(2026-07-31 채택 — 짧은 요약 자산의 판단 재료). 행 더블에 없으면 매핑이 KeyError 로
+        # 죽으므로 실제 조회 결과와 같은 모양을 유지한다. 둘째 행은 None → '' 정규화도 함께 본다.
         rows = [
-            {"id": uuid.UUID(_T1), "file_uri": "/d/a.png", "media_type": "image", "emb_score": 0.91, "summary": "요약A"},
-            {"id": uuid.UUID(_T2), "file_uri": "/d/b.txt", "media_type": "txt", "emb_score": 0.42, "summary": None},
+            {"id": uuid.UUID(_T1), "file_uri": "/d/a.png", "media_type": "image", "emb_score": 0.91,
+             "summary": "요약A", "keywords": "등산,장비"},
+            {"id": uuid.UUID(_T2), "file_uri": "/d/b.txt", "media_type": "txt", "emb_score": 0.42,
+             "summary": None, "keywords": None},
         ]
         conn, cur = _mock_conn(rows)
         out = find_embedding_candidates(conn, source_asset_id=_SRC, top_k=5, embedding_kind="both")
         self.assertEqual([c["id"] for c in out], [_T1, _T2])
         self.assertTrue(all(isinstance(c["id"], str) for c in out))
         self.assertEqual(out[1]["summary"], "")  # None → ''
+        self.assertEqual(out[0]["keywords"], "등산,장비")  # 원본 유지
+        self.assertEqual(out[1]["keywords"], "")  # None → ''
         params = cur.execute.call_args.args[1]
         self.assertEqual(params[0], _SRC)
         self.assertEqual(set(params[1]), {"st", "clip"})
@@ -553,7 +560,7 @@ class _SingleConnDB:
 
 
 # get_current_settings 가 요구하는 env 17개 없이도 순수 단위로 돌리기 위한 최소 cfg 더블.
-# propose_relations_for_asset 이 읽는 4개 설정만 채운다(나머지는 본 경로에서 미사용).
+# propose_relations_for_asset 이 읽는 설정만 채운다(나머지는 본 경로에서 미사용).
 import types  # noqa: E402
 
 _FAKE_CFG = types.SimpleNamespace(relations=types.SimpleNamespace(
@@ -562,6 +569,11 @@ _FAKE_CFG = types.SimpleNamespace(relations=types.SimpleNamespace(
     path_top_k=10,
     auto_approve_min=0.75,
     auto_approve_emb_min=0.0,  # 033: 무력 기본값(자동승인 emb 게이트 미적용)
+    # 아래 둘은 코어 설정 **기본값과 같은 값**으로 둔다 — 이 테스트들이 검증하려는 대상이 아니므로
+    # 운영과 다른 값을 넣으면 "테스트는 통과하는데 운영은 다르게 동작하는" 상태가 된다.
+    # (top_k·min_sim·auto_approve_min 은 반대로 **시나리오 값**을 일부러 쓴다.)
+    persist_min_conf_similarity=0.70,   # 유사도 계열 적재 하한(graph_persist 로 전달)
+    auto_approve_exclude_kinds="same_domain",  # 신뢰도 무관 자동승인 제외 종류
 ))
 
 
@@ -592,9 +604,13 @@ class TestCrossAssetCandidateFlowIntegration(unittest.TestCase):
         ]
         captured: dict = {}
 
+        # 코어 ``sync_graph_edges`` 의 시그니처를 **기본값까지 그대로** 반영한다(033 FR-003 ·
+        # 013 collect · 2026-07-31 persist_min_conf_similarity/auto_approve_exclude_kinds · stats).
+        # 실제와 같은 기본값을 두면 호출부가 바뀔 때 여기서 TypeError 로 드러난다.
         def _fake_sync(conn, *, source_asset_id, edges, allowed_target_ids, auto_approve_min,
-                       target_emb_scores=None, auto_approve_emb_min=0.0,
-                       collect=None):  # 033 FR-003 + 013 collect(계보 관계쌍) 신규 kwargs
+                       target_emb_scores=None, auto_approve_emb_min=0.0, collect=None,
+                       persist_min_conf_similarity=0.0,
+                       auto_approve_exclude_kinds=frozenset(), stats=None):
             captured["allowed"] = allowed_target_ids
             captured["emb_scores"] = target_emb_scores
             return 1, 0
@@ -637,8 +653,12 @@ class TestCrossAssetCandidateFlowIntegration(unittest.TestCase):
         captured: dict = {}
 
         # 066: build_relation_proposal_prompt 가 source_topic 키워드를 받게 되어 fake 시그니처도 확장.
+        # ⚠️ 이 가짜는 코어 ``build_relation_proposal_prompt`` 의 **호출 계약을 그대로 반영**해야 한다.
+        # 코어가 인자를 늘리면(source_keywords·source_filename) 여기서 TypeError 로 드러난다 —
+        # 일부러 ``**kwargs`` 로 삼키지 않는다. 삼키면 계약 변화가 조용히 묻힌다.
         def _fake_prompt(*, source_summary, source_media_type, candidates,
-                         relation_kinds_catalog, source_topic=None):
+                         relation_kinds_catalog, source_topic=None,
+                         source_keywords=None, source_filename=None):
             captured["candidates"] = list(candidates)
             return "PROMPT"
 
@@ -754,7 +774,9 @@ class TestLineageRecordsEdgePairs(unittest.TestCase):
         captured: dict = {}
 
         def _fake_sync(conn, *, source_asset_id, edges, allowed_target_ids, auto_approve_min,
-                       target_emb_scores=None, auto_approve_emb_min=0.0, collect=None):
+                       target_emb_scores=None, auto_approve_emb_min=0.0, collect=None,
+                       persist_min_conf_similarity=0.0,
+                       auto_approve_exclude_kinds=frozenset(), stats=None):
             # sync_graph_edges 가 upsert 된 쌍을 collect 에 적재(정렬 안 된 순서로) + (upserted, skipped) 반환.
             # 실제 함수 시그니처와 동일한 기본값을 둬, 향후 호출부 변경 시 fake 불일치를 드러낸다.
             if collect is not None:
@@ -772,8 +794,11 @@ class TestLineageRecordsEdgePairs(unittest.TestCase):
             def execute_in_transaction(self, fn, *, idempotent):
                 return fn(object())  # fake conn — seam 들이 전부 mock 이라 미사용
 
+        # 뒤 두 항목은 코어 설정 기본값과 맞춘 더블 — 위 _FAKE_CFG 와 같은 이유.
         cfg = SimpleNamespace(relations=SimpleNamespace(top_k=10, min_sim=0.2, path_top_k=5,
-                              auto_approve_min=0.9, auto_approve_emb_min=0.0))
+                              auto_approve_min=0.9, auto_approve_emb_min=0.0,
+                              persist_min_conf_similarity=0.70,
+                              auto_approve_exclude_kinds="same_domain"))
         with mock.patch.object(asset_entry, "get_current_settings", return_value=cfg), \
              mock.patch.object(asset_entry, "_fetch_source_row",
                                return_value={"summary": "s", "modality": "text"}), \
