@@ -17,3 +17,25 @@ venv/
 .ruff_cache/
 .mypy_cache/
 .DS_Store
+
+# ── 🔴 로컬 전용 (절대 커밋하지 않는다) ─────────────────────────────────────
+# 이 레포는 소스 코드만 담는다. 문서·설정·클로드 스펙은 비공개 문서 레포에 있고,
+# 여기서는 심볼릭 링크로만 참조한다(원본 한 벌 유지).
+CLAUDE.md
+.claude
+.specify
+docs/
+specs/
+design-history/
+
+# 실 코퍼스 asset_id 를 담은 골든·계약 파일 — 문서 레포가 소유한다.
+tests/fixtures/search/golden_os.json
+tests/fixtures/search/golden_os.judgments.json
+tests/fixtures/search/golden_words*.json
+tests/fixtures/search/search_test_topics.json
+tests/fixtures/search/golden_p29_manifest.md
+tests/fixtures/topics/same_topic_groups_contract.json
+tests/golden/
+
+# 측정 산출물·판정 라벨(재현 불가·로컬 유일본)
+tests/fixtures/relations/verdicts/
