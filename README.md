@@ -44,7 +44,7 @@ DAG 3종:
 
 ```bash
 # ① 코어 — 나란히 clone 해서 참조형으로 설치(개발) 또는 태그로 설치형
-git clone https://github.com/OWNER/dataplatform-core.git
+git clone <이 레포와 같은 계정>/dataplatform-core.git   # 예: gh repo clone <owner>/dataplatform-core
 pip install -e ./dataplatform-core
 
 # ② 이 레포
