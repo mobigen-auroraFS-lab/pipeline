@@ -30,6 +30,9 @@ import json  # noqa: E402  (테스트 헬퍼용 — 상단 import 블록 아래 
 _FIXTURE_PATH = os.path.join(
     _REPO_ROOT, "tests", "fixtures", "topics", "same_topic_groups_contract.json"
 )
+# 계약 스냅샷은 **실 코퍼스 asset_id** 를 담아 이 레포(공개)에 두지 않는다 — 비공개 문서 레포 소유.
+_HAS_FIXTURE = os.path.isfile(_FIXTURE_PATH)
+_NO_FIXTURE = f"계약 fixture 없음(비공개 문서 레포 소유): {_FIXTURE_PATH}"
 
 
 def _mock_conn_seq(fetchone_val=None, fetchall_val=None):
@@ -464,6 +467,7 @@ class TestSubtopicCoarsening(unittest.TestCase):
         self.assertEqual(m_picksub.call_args[0][2], ["국내여행·지역탐방", "해외여행"])
 
 
+@unittest.skipUnless(_HAS_FIXTURE, _NO_FIXTURE)
 class TestFetchAssetTopic(unittest.TestCase):
     """T204 — 정본 읽기(구 project_asset_topics 형상)·부재 []."""
 
@@ -496,6 +500,7 @@ class TestFetchAssetTopic(unittest.TestCase):
         self.assertEqual(fetch_asset_topic(conn, "missing"), [])
 
 
+@unittest.skipUnless(_HAS_FIXTURE, _NO_FIXTURE)
 class TestFindSameTopicGroups(unittest.TestCase):
     """T204 — 같은 (topic,subtopic) 자산 집계(구 find_topic_neighbor_groups 형상)."""
 

@@ -10,9 +10,15 @@ import unittest
 from pathlib import Path
 
 _FX = Path(__file__).resolve().parent / "fixtures" / "search"
+# 골든·라벨 근거 문서는 **실 코퍼스 asset_id** 를 담아 이 레포(공개)에 두지 않는다 —
+# 비공개 문서 레포가 소유하고 측정 시에만 가져온다. 그래서 부재 시 실패가 아니라 skip 이다.
+_HAS_GOLDEN = (_FX / "golden_os.json").is_file()
+_HAS_MANIFEST = (_FX / "golden_p29_manifest.md").is_file()
+_NO_FX = "골든 fixture 없음(비공개 문서 레포 소유)"
 _RUN = os.getenv("RUN_OS_E2E") == "1"
 
 
+@unittest.skipUnless(_HAS_GOLDEN and _HAS_MANIFEST, _NO_FX)
 class P29GoldenFixtureTest(unittest.TestCase):
     """순수: P29 스키마·라벨 계약."""
 
