@@ -41,7 +41,9 @@ except Exception:  # noqa: BLE001 — airflow 미설치/임포트 실패 시 전
     _AIRFLOW_AVAILABLE = False
 
 # 프로젝트 루트 기준 DAG 폴더(테스트가 어디서 실행돼도 절대경로). dags 는 repo 정본 —
-#   네이티브 Airflow(run.sh)가 AIRFLOW__CORE__DAGS_FOLDER 로 이 dags 를 직접 가리킨다(도커 제거·소스=repo).
+#   네이티브 Airflow 가 AIRFLOW__CORE__DAGS_FOLDER 로 이 dags 를 직접 가리킨다(도커 제거·소스=repo).
+#   기동 절차는 README §실행 참조 — 기동 스크립트는 머신 전용 가정(conda 환경명·메타DB)이 있어
+#   이 레포에 두지 않는다.
 _DAG_FOLDER = str(Path(__file__).resolve().parents[1] / "deploy" / "airflow" / "dags")
 
 _EXPECTED_DAGS = {"dag_collect", "dag_process", "dag_relations"}

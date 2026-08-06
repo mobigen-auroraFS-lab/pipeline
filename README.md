@@ -132,13 +132,26 @@ python -m processing.app.run_search    --env dev --query "<질의>"   # 검색(�
 python -m processing.app.run_opensearch_resync --env dev           # 색인 재생성
 ```
 
-Airflow 로 상시 운영하려면:
+Airflow 로 상시 운영하려면 — DAG 폴더를 지정해 네이티브로 띄웁니다.
 
 ```bash
-cd deploy/airflow
-./run.sh start      # scheduler · dag-processor · api-server 일괄 기동
-./run.sh status     # 상태 확인 (중지: stop · 재기동: restart)
+export AIRFLOW_HOME=~/airflow-home                    # 메타DB·설정 위치(임의)
+export AIRFLOW__CORE__DAGS_FOLDER=$PWD/deploy/airflow/dags
+export AIRFLOW__CORE__LOAD_EXAMPLES=False
+export META_ENV=dev                                   # 코어 설정 프로파일
+
+airflow db migrate                                    # 최초 1회
+airflow scheduler &                                   # 스케줄러
+airflow dag-processor &                               # DAG 파싱(3.x 는 별 프로세스)
+airflow api-server &                                  # UI/API
 ```
+
+> ⚠️ **DAG 태스크는 앱 환경변수를 프로세스 환경에서 물려받습니다.** `META_MODEL` 등이 빠지면
+> 태스크가 `init_settings` 에서 즉시 실패합니다 → Airflow 를 띄우기 **전에** `.env.dev` 값을
+> 환경으로 올리십시오: `set -a; . ./.env.dev; set +a`
+>
+> ⚠️ Airflow 메타DB는 앱 DB와 **분리**하십시오(같은 이름을 쓰면 충돌합니다).
+> GPU·모델을 쓰는 태스크는 동시 실행을 1로 제한하는 pool 을 두는 것이 안전합니다.
 
 ## 테스트
 
