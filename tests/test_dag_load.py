@@ -46,10 +46,13 @@ except Exception:  # noqa: BLE001 — airflow 미설치/임포트 실패 시 전
 #   이 레포에 두지 않는다.
 _DAG_FOLDER = str(Path(__file__).resolve().parents[1] / "deploy" / "airflow" / "dags")
 
-_EXPECTED_DAGS = {"dag_collect", "dag_process", "dag_relations"}
+_EXPECTED_DAGS = {"dag_collect", "dag_process", "dag_relations", "dag_mm_meta", "dag_mm_classify"}
 _COLLECT_TASK = "collect_inbox"
 _PROCESS_TASK = "process_batch"
 _RELATIONS_TASK = "propose_relations"
+# 084/085 — 적재와 분리된 후속 배치 DAG(관계 DAG 동형·연속 드레인).
+_MM_META_TASK = "bind_mm_meta"
+_MM_CLASSIFY_TASK = "classify_assets"
 
 _AID = uuid.UUID("018f0000-0000-7000-8000-000000000010")
 
@@ -139,13 +142,18 @@ class TestDagBagIntegrity(unittest.TestCase):
             "dag_process": {_PROCESS_TASK, "gate_new_registered", "trigger_relations", "archive_processed",
                             "gate_more_received", "trigger_more"},
             "dag_relations": {_RELATIONS_TASK, "gate_more_unresolved", "trigger_more"},
+            # 084/085: 판정 → 진전 게이트 → 자기 재트리거(연속 드레인 · 관계 DAG 동형).
+            "dag_mm_meta": {_MM_META_TASK, "gate_more_mm_meta", "trigger_more"},
+            "dag_mm_classify": {_MM_CLASSIFY_TASK, "gate_more_mm_classify", "trigger_more"},
         }
         for dag_id, tasks in expected_tasks.items():
             self.assertEqual({t.task_id for t in bag.dags[dag_id].tasks}, tasks,
                              msg=f"{dag_id} 태스크 구성")
         # 기본 래퍼는 여전히 python_callable 을 가진 얇은 래퍼(FR-011).
         for dag_id, task_id in (("dag_collect", _COLLECT_TASK), ("dag_process", _PROCESS_TASK),
-                                ("dag_relations", _RELATIONS_TASK)):
+                                ("dag_relations", _RELATIONS_TASK),
+                                ("dag_mm_meta", _MM_META_TASK),
+                                ("dag_mm_classify", _MM_CLASSIFY_TASK)):
             task = bag.dags[dag_id].get_task(task_id)
             self.assertTrue(callable(getattr(task, "python_callable", None)),
                             msg=f"{dag_id}.{task_id} python_callable")
@@ -172,6 +180,13 @@ class TestDagBagIntegrity(unittest.TestCase):
         self.assertEqual(rel.get_task("trigger_more").trigger_dag_id, "dag_relations")
         self.assertIn("gate_more_unresolved", rel.get_task(_RELATIONS_TASK).downstream_task_ids)
         self.assertIn("trigger_more", rel.get_task("gate_more_unresolved").downstream_task_ids)
+        # 084/085 도 같은 self-retrigger 배선(적재·관계와 독립적으로 자기 잔여만 소화한다).
+        for dag_id, task_id, gate in (("dag_mm_meta", _MM_META_TASK, "gate_more_mm_meta"),
+                                      ("dag_mm_classify", _MM_CLASSIFY_TASK, "gate_more_mm_classify")):
+            dag = bag.dags[dag_id]
+            self.assertEqual(dag.get_task("trigger_more").trigger_dag_id, dag_id)
+            self.assertIn(gate, dag.get_task(task_id).downstream_task_ids)
+            self.assertIn("trigger_more", dag.get_task(gate).downstream_task_ids)
 
     def test_archive_wiring(self) -> None:
         # 061: 인입 게이트 → collect_inbox(빈 인입서 collect 스킵), process_batch → archive_processed(꼬리·병렬).
@@ -195,11 +210,15 @@ class TestDagBagIntegrity(unittest.TestCase):
         import sys
 
         heavy = ("PostgresUtil", "init_settings", "process_received_batch",
-                 "run_relations", "collect_file", "scan_unresolved_assets")
+                 "run_relations", "collect_file", "scan_unresolved_assets",
+                 # 084/085 — 배치 러너는 코어(src.mm_meta·src.mm_classify)를 통째로 끌어온다.
+                 "run_batch", "resolve_discovery_mode")
         for dag_id, task_id in (
             ("dag_collect", _COLLECT_TASK),
             ("dag_process", _PROCESS_TASK),
             ("dag_relations", _RELATIONS_TASK),
+            ("dag_mm_meta", _MM_META_TASK),
+            ("dag_mm_classify", _MM_CLASSIFY_TASK),
         ):
             cb = _callable(dag_id, task_id)
             module = inspect.getmodule(cb) or sys.modules.get(cb.__module__)
@@ -347,6 +366,65 @@ class TestThinWrappers(unittest.TestCase):
             cb()
         # 미해소 0건이면 run_relations 를 부르지 않는다(빈 배치 호출 회피).
         m_rr.assert_not_called()
+
+    def test_mm_meta_callable_delegates_to_run_batch(self) -> None:
+        # 084 T006 — DAG 는 배선을 복사하지 않고 러너의 run_batch(색인 1회·자산별 트랜잭션)를 부른다.
+        cb = _callable("dag_mm_meta", _MM_META_TASK)
+        db, _c, _cur = _fake_db()
+        with mock.patch.dict(os.environ, {"META_ENV": "dev", "DAG_MM_META_LIMIT": "25"}), \
+                mock.patch("src.config.settings.init_settings") as m_init, \
+                mock.patch("src.database.postgres_util.PostgresUtil", return_value=db), \
+                mock.patch("processing.app.run_mm_meta_binding.run_batch",
+                           return_value={"binding": {"judged_ok": 2, "judged_failed": 1,
+                                                     "assets_bound": 2},
+                                         "describe": None, "orphans": []}) as m_batch:
+            summary = cb()
+        m_init.assert_called_once()
+        m_batch.assert_called_once()
+        self.assertIs(m_batch.call_args.args[0], db)
+        self.assertEqual(m_batch.call_args.kwargs["limit"], 25)   # 한 번에 처리할 양은 env 로
+        self.assertEqual(summary, {"judged": 2, "failed": 1, "bound": 2})
+
+    def test_mm_meta_callable_survives_disabled_toggle(self) -> None:
+        # 토글이 꺼지면 러너가 binding=None 을 돌려준다 — DAG 가 그 위에서 터지면 안 된다.
+        cb = _callable("dag_mm_meta", _MM_META_TASK)
+        db, _c, _cur = _fake_db()
+        with mock.patch.dict(os.environ, {"META_ENV": "dev"}), \
+                mock.patch("src.config.settings.init_settings"), \
+                mock.patch("src.database.postgres_util.PostgresUtil", return_value=db), \
+                mock.patch("processing.app.run_mm_meta_binding.run_batch",
+                           return_value={"skipped": "disabled", "binding": None,
+                                         "describe": None, "orphans": []}):
+            summary = cb()
+        self.assertEqual(summary["judged"], 0)   # 진전 0 → 드레인 게이트가 막는다
+
+    def test_mm_classify_callable_delegates_to_run_batch(self) -> None:
+        # 085 T110 — 같은 규율(DAG 에 비즈니스 로직 0).
+        cb = _callable("dag_mm_classify", _MM_CLASSIFY_TASK)
+        db, _c, _cur = _fake_db()
+        with mock.patch.dict(os.environ, {"META_ENV": "dev", "DAG_MM_CLASSIFY_LIMIT": "40"}), \
+                mock.patch("src.config.settings.init_settings") as m_init, \
+                mock.patch("src.database.postgres_util.PostgresUtil", return_value=db), \
+                mock.patch("processing.app.run_mm_classify.run_batch",
+                           return_value={"judged": 3, "failed": 0, "indexed": 3}) as m_batch:
+            summary = cb()
+        m_init.assert_called_once()
+        m_batch.assert_called_once()
+        self.assertIs(m_batch.call_args.args[0], db)
+        self.assertEqual(m_batch.call_args.kwargs["limit"], 40)
+        self.assertEqual(summary, {"judged": 3, "failed": 0, "indexed": 3})
+
+    def test_mm_drain_gates_pass_only_on_progress(self) -> None:
+        # 연속 드레인 조건은 "이번에 판정한 것이 있는가"다 — 전량 실패로 정체할 때 다시 깨우면
+        # 진전 없이 빙빙 돈다(dag_relations 와 같은 규율).
+        meta_gate = _callable("dag_mm_meta", "gate_more_mm_meta")
+        self.assertTrue(meta_gate(**_fake_context({"judged": 2, "failed": 0})))
+        self.assertFalse(meta_gate(**_fake_context({"judged": 0, "failed": 5})))
+        self.assertFalse(meta_gate(**_fake_context(None)))
+        cls_gate = _callable("dag_mm_classify", "gate_more_mm_classify")
+        self.assertTrue(cls_gate(**_fake_context({"judged": 1})))
+        self.assertFalse(cls_gate(**_fake_context({"judged": 0})))
+        self.assertFalse(cls_gate(**_fake_context(None)))
 
     def test_collect_gate_passes_only_when_new_received(self) -> None:
         # (a) 게이트 — 신규 수집이 있을 때만 trigger_process 통과(빈 인입에 GPU 배치 헛 기동 차단).
