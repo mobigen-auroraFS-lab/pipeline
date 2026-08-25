@@ -13,6 +13,13 @@
 발산한다(자산 10만 × 개체 10만 = 100억 · 코어 T017 이 고친 결함). 이 러너는 색인을 **찾아보기만**
 하고 훑거나 복사하지 않는다 — 단위 테스트가 "훑으면 터지는 가짜 색인"으로 그것을 봉인한다.
 
+**타입 어휘(정의문)도 배치 시작에 한 번 읽는다**(F05 · spec §10). 색인 2벌과 **같은 읽기
+트랜잭션**에서 ``fetch_meta_type_vocab`` 으로 읽어 판정(``type_defs=``)에 싣고, 그 어휘로부터
+``prompt_version_for`` 로 **판(pv)**을 정한다. 🔴 그 한 값이 두 곳에 동시에 쓰인다 —
+**재선별 술어**(``fetch_binding_targets``)와 **저장 스탬프**(``upsert_entity_edges``). 둘이 갈리면
+매 배치가 같은 자산을 영원히 다시 집거나(술어가 더 새 판을 찾음), 문안은 v1 인데 스탬프만 v2 로
+찍혀 정의문 효과 확인·재판정 범위 산정이 불가능해진다.
+
 **발굴 모드**(spec §1-1 · 설정 ``MM_META_DISCOVERY_MODE``)
     - ``propose``(기본) — **이미 존재하는 메타**(수동 선등록 + 지난 배치 발굴분)의 표기·별칭과
       일치하는 판정만 소속시킨다. 미등록 개체는 노드·엣지를 만들지 않고 **후보 리포트**로만 낸다.
@@ -46,20 +53,24 @@ from psycopg.rows import dict_row
 
 from src.mm_meta import (
     DESC_PROMPT_VERSION,
+    ENTITY_TYPE_DEFS,
     LINEAGE_ACTIVITY,
     MM_MEMBER_KIND_CODE,
     MM_META_VISIBLE_STATUSES,
     PROMPT_VERSION,
     RULE_VERSION,
+    EntityTypeDef,
     ExtractedEntity,
     apply_rules,
     describe_meta,
     ensure_mm_member_kind,
     fetch_meta_description_targets,
     fetch_meta_members,
+    fetch_meta_type_vocab,
     fetch_official_name_index,
     fetch_registered_alias_index,
     judge_asset_entities,
+    prompt_version_for,
     resolve_registered_aliases,
     upsert_entity_edges,
     upsert_meta_description,
@@ -74,6 +85,21 @@ DISCOVERY_MODES: tuple[str, ...] = (DISCOVERY_PROPOSE, DISCOVERY_AUTO)
 # 코어 설정(``src.config.settings``)에는 이 키가 없다 — 발굴 모드는 파이프 배치의 운영 손잡이라
 # spec §구현 확정 G3 이 "T006(파이프) 소관"으로 정했다. 그래서 env 를 직접 읽는다.
 DISCOVERY_MODE_ENV = "MM_META_DISCOVERY_MODE"
+
+# ── 타입 어휘 출처(F05 · spec §10) ──────────────────────────────────────────────
+# 운영자가 리포트만 보고 "등록한 정의문이 적용됐나"를 알 수 있게 세 갈래로 적어 준다.
+#   registered  — ``mm_skill``(skill_code=mm_meta_type) 등록 행에서 읽었다.
+#   code_preset — 등록 행이 없거나 비활성이라 코드 프리셋으로 폴백했다(코어가 WARNING 도 남긴다).
+#   none        — 어휘를 아예 주입받지 않았다(정의문 없는 옛 문안 · 조립부를 직접 부른 경우).
+VOCAB_SOURCE_REGISTERED = "registered"
+VOCAB_SOURCE_PRESET = "code_preset"
+VOCAB_SOURCE_NONE = "none"
+# 리포트 한 줄에 붙일 사람 말. 출처를 코드 값으로만 찍으면 운영자가 다시 물어보게 된다.
+_VOCAB_SOURCE_LABELS = {
+    VOCAB_SOURCE_REGISTERED: "등록 행",
+    VOCAB_SOURCE_PRESET: "코드 프리셋(등록 행 없음 → 폴백)",
+    VOCAB_SOURCE_NONE: "미주입(정의문 없이 판정)",
+}
 
 # 리포트에 담는 상한 — 콘솔·XCom 이 넘치지 않게 자른다(전체 수는 ``*_total`` 로 함께 보고한다).
 _MAX_CANDIDATES = 200
@@ -163,6 +189,30 @@ def resolve_discovery_mode(raw: str | None) -> str:
     return text
 
 
+def vocab_source_of(type_defs: Sequence[EntityTypeDef] | None) -> str:
+    """이 어휘가 **어디서 왔는지** 판정한다(순수 · 리포트 표시용).
+
+    코어 계약을 그대로 읽는 것이다: ``fetch_meta_type_vocab`` 은 등록 행이면 **새로 만든** 튜플을,
+    행이 없거나 비활성이면 코드 프리셋 상수 ``ENTITY_TYPE_DEFS`` **그 객체**를 돌려준다. 그래서
+    객체 동일성(``is``)만으로 두 경로가 갈린다 — 내용 비교로는 "등록 행이 프리셋과 똑같은 문안"인
+    경우를 폴백으로 잘못 적게 된다(등록 CLI 가 프리셋을 그대로 올리므로 **정상 등록 직후가 바로 그
+    상태**다. 운영자가 알고 싶은 것은 "내 등록이 살아 있나"다).
+
+    ⚠️ **표시 전용**이다 — 문안도 스탬프도 이 값에 좌우되지 않는다(둘 다 ``type_defs`` 자체와
+    ``prompt_version_for`` 가 정한다). 그래서 호출부가 어휘를 다른 자료형으로 감싸 넘겨(``list(…)``)
+    출처가 잘못 적히더라도 판정·저장은 어긋나지 않는다.
+
+    Args:
+        type_defs: 판정에 실은 타입 정의문. ``None``·빈 목록이면 어휘를 주입받지 않은 것이다.
+
+    Returns:
+        ``registered``·``code_preset``·``none`` 중 하나.
+    """
+    if not tuple(type_defs or ()):
+        return VOCAB_SOURCE_NONE
+    return VOCAB_SOURCE_PRESET if type_defs is ENTITY_TYPE_DEFS else VOCAB_SOURCE_REGISTERED
+
+
 def split_by_registration(
     entities: Sequence[ExtractedEntity],
     alias_index: Mapping[tuple[str, str], str],
@@ -212,6 +262,7 @@ def run_binding(
     official_index: Mapping[tuple[str, str], str] | None = None,
     alias_index: Mapping[tuple[str, str], str] | None = None,
     summary_max_chars: int | None = None,
+    type_defs: Sequence[EntityTypeDef] | None = None,
     dry_run: bool = False,
     judge_fn: Callable[..., Any] | None = None,
     persist_fn: Callable[[str, Sequence[ExtractedEntity]], Mapping[str, Any]] | None = None,
@@ -237,6 +288,10 @@ def run_binding(
             후보가 된다.
         summary_max_chars: 판정 프롬프트에 싣는 요약 상한(설정 ``MM_META_JUDGE_SUMMARY_CHARS``).
             ``None``(기본)이면 코어 문안 기본값 250 을 쓴다.
+        type_defs: 개체 타입 **정의문** 목록(F05 · ``fetch_meta_type_vocab`` 결과). ``None``(기본)이면
+            정의문 없이 **기존 문안 그대로** 판정한다(코어 하위호환). 이 값이 곧 리포트의
+            ``prompt_version``(``prompt_version_for``)을 정한다 — 🔴 문안과 스탬프가 갈리면 정의문
+            효과 확인도, 재판정 대상 산정도 못 한다. 🔴 배치 시작에 한 번 읽은 것을 넘긴다.
         dry_run: 참이면 **아무 것도 쓰지 않고** 무엇이 바뀔지만 보고한다(판정 LLM 호출은 한다 —
             무엇이 저장될지 알려면 판정이 필요하다).
         judge_fn: 개체 판정 함수. ``None``(기본)이면 코어 ``judge_asset_entities``(LLM 단일
@@ -250,7 +305,8 @@ def run_binding(
 
     Returns:
         diff 리포트 dict — 대상·판정 성공/실패(사유별)·소속 엣지 증감·신규 메타·상위 묶음·
-        **미등록 후보 목록**(propose 모드). 같은 입력이면 같은 리포트가 나온다(결정적 정렬).
+        **미등록 후보 목록**(propose 모드)·**타입 어휘 출처와 실제 사용한 문안 판**. 같은 입력이면
+        같은 리포트가 나온다(결정적 정렬).
 
     Raises:
         ValueError: ``mode`` 가 어휘 밖이거나, 쓰기 모드인데 ``persist_fn`` 이 없을 때.
@@ -267,6 +323,11 @@ def run_binding(
     report: dict[str, Any] = {
         "mode": mode,
         "dry_run": bool(dry_run),
+        # 어휘 출처·문안 판은 **판정 전에** 확정된다(자산 0건이어도 리포트에 남는다) — 운영자가
+        # "이번 배치가 무슨 문안으로 돌았나"를 결과 유무와 무관하게 확인할 수 있어야 한다.
+        "vocab_source": vocab_source_of(type_defs),
+        "type_defs": len(tuple(type_defs or ())),
+        "prompt_version": prompt_version_for(type_defs),
         "targets": len(materials),
         "judged_ok": 0,
         "judged_failed": 0,
@@ -291,7 +352,10 @@ def run_binding(
         keywords = list(item.get("keywords") or [])
         try:
             judgement = judge(
-                summary, keywords, client=client, summary_max_chars=summary_max_chars
+                summary, keywords, client=client, summary_max_chars=summary_max_chars,
+                # 정의문을 실은 문안으로 판정한다 — 스탬프(report["prompt_version"])는 **같은 값**
+                # 에서 나왔다(prompt_version_for). 둘을 따로 정하면 문안과 판이 갈린다.
+                type_defs=type_defs,
             )
             if not judgement.ok:
                 # 실패는 이력을 남기지 않는다 → 다음 배치가 이 자산을 다시 집는다(spec §2).
@@ -469,6 +533,7 @@ def fetch_binding_targets(
     asset_ids: Sequence[str] | None = None,
     rejudge: bool = False,
     limit: int | None = None,
+    prompt_version: str = PROMPT_VERSION,
 ) -> list[dict[str, Any]]:
     """판정 대상 자산과 그 재료(요약·키워드)를 한 번에 읽는다(조회 전용·결정적 정렬 · spec §6).
 
@@ -482,6 +547,11 @@ def fetch_binding_targets(
         rejudge: 참이면 **판정 이력 필터를 빼고** 다시 판정한다. 후보를 등록(승인)한 직후 그 후보가
             나왔던 자산을 다시 붙이는 경로다 — 이력이 남아 있어 평소에는 재선별되지 않기 때문이다.
         limit: 한 번에 가져올 상한. ``None``(기본)이면 전량(배치를 나눠 돌 때만 준다).
+        prompt_version: 재선별 술어의 ``pv`` 축 — "이 판으로 이미 판정된 자산"을 제외한다.
+            기본값은 현행 문안 판이지만, 🔴 **배치는 반드시 명시로 넘긴다**: 이번 판정이 실제로 쓸
+            문안 판(``prompt_version_for(type_defs)``)과 같은 값이어야 한다. 다르면 선별과 저장이
+            엇갈려 같은 자산을 매 배치 다시 집는다(무한 재판정) — 술어가 저장 스탬프보다 **새
+            판**을 찾으면 그 자산의 이력은 영원히 조건을 만족하지 못한다.
 
     Returns:
         ``[{asset_id(str), summary(str), keywords(list[str])}]`` — asset_id 오름차순. 요약·키워드는
@@ -494,7 +564,7 @@ def fetch_binding_targets(
         params.append([str(a) for a in asset_ids])
     if not rejudge:
         sql += _TARGET_HISTORY_SQL
-        params.extend([LINEAGE_ACTIVITY, PROMPT_VERSION, RULE_VERSION])
+        params.extend([LINEAGE_ACTIVITY, prompt_version, RULE_VERSION])
     sql += "ORDER BY a.asset_id\n"
     if limit is not None:
         sql += "LIMIT %s\n"
@@ -555,8 +625,17 @@ def format_report(
         상태를 못 본다(자세한 목록은 반환 dict 에 있다).
     """
     dry = " (dry-run · 쓰기 0)" if report.get("dry_run") else ""
+    # 타입 어휘 줄 — "등록한 정의문이 이번 배치에 적용됐나"와 "무슨 판으로 스탬프됐나"를 한 줄에.
+    source = str(report.get("vocab_source", VOCAB_SOURCE_NONE))
+    label = _VOCAB_SOURCE_LABELS.get(source, source)
+    count = int(report.get("type_defs", 0) or 0)
+    vocab_line = f"  타입 어휘: {label}"
+    if count:
+        vocab_line += f" {count}종"
+    vocab_line += f" · pv={report.get('prompt_version', '?')}"
     lines = [
         f"[멀티모달 메타 소속] mode={report.get('mode')}{dry}",
+        vocab_line,
         f"  대상 {report.get('targets', 0)}건 | 판정 성공 {report.get('judged_ok', 0)} · "
         f"실패 {report.get('judged_failed', 0)}",
         f"  소속 자산 {report.get('assets_bound', 0)} · 소속 0건 {report.get('assets_empty', 0)} | "
@@ -601,13 +680,17 @@ def run_batch(
     dry_run: bool = False,
     describe: bool = True,
 ) -> dict[str, Any]:
-    """배치 한 판을 배선한다 — 색인 조립 1회 → 자산 루프 → 설명 단계 → 고아 리포트.
+    """배치 한 판을 배선한다 — 어휘·색인 조립 1회 → 자산 루프 → 설명 단계 → 고아 리포트.
 
     ``main``(명령행)과 Airflow DAG 가 **같은 이 함수**를 부른다. DAG 에 배선을 복사하면 한쪽만
     고쳐져 갈라진다(예: DAG 쪽에서 색인을 자산마다 만드는 실수).
 
+    🔴 **문안 판(pv)은 여기서 한 번만 정해진다**(``_load`` 안 · 타입 어휘로부터). 그 값이 재선별
+    술어와 저장 스탬프 양쪽에 그대로 흘러간다 — 두 곳에서 따로 정하면 갈릴 수 있고, 갈리면 매
+    배치가 같은 자산을 다시 판정한다(LLM 비용이 자산 수만큼 반복된다).
+
     트랜잭션 경계가 이 함수의 핵심 책임이다:
-        - 색인 2벌 + 대상 목록 = **읽기 트랜잭션 한 번**(색인은 배치당 1회가 계약이다).
+        - 타입 어휘 + 색인 2벌 + 대상 목록 = **읽기 트랜잭션 한 번**(전부 배치당 1회가 계약이다).
         - 자산 하나의 저장 = **fresh 트랜잭션**(한 건 실패가 다른 자산을 롤백시키지 않는다).
         - 설명 저장도 건마다 별도 트랜잭션(묶음이 확정된 뒤 도는 별도 단계).
 
@@ -624,7 +707,13 @@ def run_batch(
     Returns:
         ``{"binding": diff 리포트, "describe": 설명 리포트|None, "orphans": [...]}``.
         토글(``MM_META_BINDING_ENABLED``)이 꺼져 있으면 ``{"skipped": "disabled", …}`` 를 돌려주고
-        질의도 LLM 호출도 하지 않는다.
+        질의도 LLM 호출도 하지 않는다. ``binding`` 리포트에는 이번 배치가 쓴 **타입 어휘 출처**
+        (``vocab_source``)와 **문안 판**(``prompt_version``)이 함께 담긴다.
+
+    Raises:
+        MmMetaPersistError: 타입 어휘 등록 행이 닫힌 5종과 어긋날 때(코어 fail-fast). 어휘가 어긋난
+            채 돌면 그 배치의 판정 전체가 의도와 다른 문안으로 나가므로 **첫 읽기에서** 멈춘다.
+            등록 행이 아예 없거나 비활성인 것은 예외가 아니라 코드 프리셋 폴백이다(경고만 남는다).
     """
     from src.config.settings import get_current_settings
 
@@ -638,16 +727,33 @@ def run_batch(
         # 카탈로그 행이 없거나 비활성이면 저장이 fail-fast 로 거부된다(조용한 0건 금지).
         db.execute_in_transaction(ensure_mm_member_kind, idempotent=True)
 
-    def _load(conn: Any) -> tuple[Any, Any, list[dict[str, Any]]]:
-        """읽기 트랜잭션 한 번에 색인 2벌과 대상 목록을 만든다(색인 조립은 배치당 1회)."""
+    def _load(conn: Any) -> tuple[tuple[EntityTypeDef, ...], str, Any, Any, list[dict[str, Any]]]:
+        """읽기 트랜잭션 한 번에 **타입 어휘 · 색인 2벌 · 대상 목록**을 만든다(전부 배치당 1회).
+
+        어휘를 **가장 먼저** 읽는다 — 그것이 이번 배치의 문안 판(``pv``)을 정하고, 바로 아래 대상
+        선별이 그 판으로 "이미 판정된 자산"을 걸러야 하기 때문이다. 한 트랜잭션 안이라 어휘와 대상이
+        서로 다른 시점의 DB 를 보는 일이 없다(배치 도중 어휘가 등록돼도 이번 판은 일관된다).
+
+        Args:
+            conn: 읽기 트랜잭션의 커넥션(호출부가 연다).
+
+        Returns:
+            ``(타입 정의문, 문안 판, 공식 표기 색인, 별칭 색인, 대상 재료)``.
+        """
+        type_defs = fetch_meta_type_vocab(conn)
+        # 🔴 이 한 값이 재선별 술어와 저장 스탬프 **양쪽**에 쓰인다(따로 계산하지 않는다).
+        prompt_version = prompt_version_for(type_defs)
         official = fetch_official_name_index(conn)
         aliases = fetch_registered_alias_index(conn)
         targets = fetch_binding_targets(
-            conn, asset_ids=list(asset_ids) if asset_ids else None, rejudge=rejudge, limit=limit
+            conn, asset_ids=list(asset_ids) if asset_ids else None, rejudge=rejudge, limit=limit,
+            prompt_version=prompt_version,
         )
-        return official, aliases, targets
+        return type_defs, prompt_version, official, aliases, targets
 
-    official_index, alias_index, materials = db.execute_in_transaction(_load, idempotent=True)
+    type_defs, prompt_version, official_index, alias_index, materials = db.execute_in_transaction(
+        _load, idempotent=True
+    )
     if mode == DISCOVERY_PROPOSE and materials and not alias_index:
         # 등록 메타 0 은 **정상 상태**다(등록 전) — 다만 이번 배치는 소속을 하나도 만들지 못하고
         # 후보 리포트만 낸다. 조용히 지나가면 "왜 묶음이 안 생기나"를 코드에서 찾게 된다.
@@ -670,7 +776,12 @@ def run_batch(
             코어 저장 결과 dict(삭제·삽입 엣지 수 포함).
         """
         return db.execute_in_transaction(
-            lambda conn, _aid=asset_id, _ents=entities: upsert_entity_edges(conn, _aid, _ents),
+            # 🔴 ``prompt_version`` 을 **명시**한다. 코어 기본값은 모듈 상수(현행 최신 판)라, 정의문
+            #    없이 나간 판정도 최신 판으로 찍힌다 — 위 ``_load`` 가 정한 값(= 재선별 술어와 같은
+            #    값)만 스탬프에 남긴다. 그래야 문안과 판이 항상 일치한다.
+            lambda conn, _aid=asset_id, _ents=entities: upsert_entity_edges(
+                conn, _aid, _ents, prompt_version=prompt_version
+            ),
             idempotent=False,
         )
 
@@ -680,6 +791,7 @@ def run_batch(
         official_index=official_index,
         alias_index=alias_index,
         summary_max_chars=cfg.mm_meta.judge_summary_chars,
+        type_defs=type_defs,
         dry_run=dry_run,
         persist_fn=None if dry_run else _persist,
     )
