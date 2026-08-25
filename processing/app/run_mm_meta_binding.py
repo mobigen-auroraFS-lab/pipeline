@@ -798,10 +798,20 @@ def run_batch(
 
     describe_report: dict[str, Any] | None = None
     if describe and cfg.mm_meta.describe_enabled:
+        # 🔴 설명 대상에도 소속과 **같은 상한**을 적용한다. 이 배치의 전제는 "짧게 돌고 남으면 다시
+        # 돈다"(연속 드레인)인데, 조회는 상한이 없어 처음 켜는 시점이나 임계 개정 후에는 대상이
+        # 한꺼번에 쌓인다 — 그때 한 태스크가 수천 건을 LLM 에 태우면 그 전제가 깨진다.
+        # 잘라낸 나머지는 다음 실행이 집는다(대상 판정이 저장된 값 기준이라 진행이 유실되지 않는다).
         desc_targets = db.execute_in_transaction(
             lambda conn: fetch_meta_description_targets(conn, prompt_version=DESC_PROMPT_VERSION),
             idempotent=True,
         )
+        if limit is not None and len(desc_targets) > limit:
+            _LOG.info(
+                "설명 대상 %d건 중 %d건만 처리한다(상한) — 나머지는 다음 실행이 집는다",
+                len(desc_targets), limit,
+            )
+            desc_targets = desc_targets[:limit]
 
         def _members(entity_type: str, entity_uid: str) -> Any:
             """설명 재료(모달리티·요약)를 읽는다 — 읽기 전용 트랜잭션."""
@@ -878,7 +888,8 @@ def main() -> int:
     """멀티모달 메타 소속 배치를 실행한다(명령행 진입점).
 
     Returns:
-        0=성공(실패 자산 0), 1=실패한 자산이 있음.
+        0=성공, 1=실패가 있음 — **판정 실패 자산 또는 설명 생성 실패**. 둘 중 하나라도 있으면
+        0 이 아니다(설명 실패만 있을 때 성공으로 보이던 것을 고쳤다).
     """
     args = _build_parser().parse_args()
 
@@ -904,8 +915,13 @@ def main() -> int:
         print("[멀티모달 메타 소속] MM_META_BINDING_ENABLED=0 — 아무 것도 하지 않는다")
         return 0
     report = result["binding"]
+    describe_report = result["describe"] or {}
     print(format_report(report, describe=result["describe"], orphans=result["orphans"]))
-    return 1 if report["judged_failed"] else 0
+    # 설명 단계 실패도 종료 코드에 반영한다. DAG 는 ``run_batch`` 를 직접 부르므로 영향이 없지만,
+    # 사람이 CLI 를 돌려 ``$?`` 로 성공을 판단하는 경우 설명 실패가 조용히 성공으로 보였다
+    # (``run_mm_classify`` 는 색인 실패까지 반영한다 — 두 러너의 규율을 맞춘다).
+    failed = bool(report["judged_failed"]) or bool(describe_report.get("failed"))
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

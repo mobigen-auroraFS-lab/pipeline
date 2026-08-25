@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import sys
 import unittest
 import uuid
 from collections.abc import Iterator, Mapping
@@ -646,6 +647,33 @@ class TestRunBatchWiring(unittest.TestCase):
         m_persist.assert_not_called()
         self.assertTrue(result["binding"]["dry_run"])
 
+    def test_describe_targets_respect_limit(self) -> None:
+        # 소속은 상한이 있는데 설명만 없으면, 처음 켜는 시점에 한 태스크가 전량을 LLM 에 태운다
+        # (짧게 돌고 남으면 다시 도는 전제가 깨진다).
+        many = [("place", f"uid{i}") for i in range(5)]
+        patches = self._patches(targets=[])
+        patches["desc"] = mock.patch.object(
+            rb, "fetch_meta_description_targets", return_value=many)
+        with patches["official"], patches["alias"], patches["targets"], patches["kind"], \
+                patches["judge"], patches["persist"], patches["desc"], \
+                patches["orphan"], patches["cfg"], \
+                mock.patch.object(rb, "run_describe", return_value={"failed": 0}) as m_run:
+            rb.run_batch(_FakeDB(), mode=rb.DISCOVERY_AUTO, limit=2)
+        self.assertEqual(len(m_run.call_args.args[0]), 2)  # 잘라서 넘긴다
+
+    def test_describe_targets_untouched_without_limit(self) -> None:
+        # 상한 미지정(기본)은 기존 동작 그대로 — 전량을 넘긴다.
+        many = [("place", f"uid{i}") for i in range(5)]
+        patches = self._patches(targets=[])
+        patches["desc"] = mock.patch.object(
+            rb, "fetch_meta_description_targets", return_value=many)
+        with patches["official"], patches["alias"], patches["targets"], patches["kind"], \
+                patches["judge"], patches["persist"], patches["desc"], \
+                patches["orphan"], patches["cfg"], \
+                mock.patch.object(rb, "run_describe", return_value={"failed": 0}) as m_run:
+            rb.run_batch(_FakeDB(), mode=rb.DISCOVERY_AUTO)
+        self.assertEqual(len(m_run.call_args.args[0]), 5)
+
     def test_describe_stage_respects_setting_and_flag(self) -> None:
         patches = self._patches(targets=[], settings=_settings(describe=False))
         with patches["official"], patches["alias"], patches["targets"], patches["kind"], \
@@ -925,6 +953,39 @@ class TestFetchTargetsPromptVersion(unittest.TestCase):
         _sql, params = conn.executed[0]
         self.assertIn(PROMPT_VERSION_WITHOUT_TYPE_DEFS, params)
         self.assertNotIn(PROMPT_VERSION, params)
+
+
+class TestMainExitCode(unittest.TestCase):
+    """CLI 종료 코드 — 사람이 ``$?`` 로 성공을 판단하는 경로다(DAG 는 ``run_batch`` 를 직접 부른다)."""
+
+    def _main(self, *, judged_failed: int, describe: dict | None) -> int:
+        """``run_batch`` 결과만 갈아 끼우고 ``main`` 의 종료 코드를 본다."""
+        result = {
+            "binding": {"judged_failed": judged_failed},
+            "describe": describe,
+            "orphans": [],
+        }
+        # ``main`` 이 함수 안에서 import 하므로 원 모듈을 패치한다(모듈 속성이 아니다).
+        with mock.patch("src.config.bootstrap.bootstrap_env"), \
+                mock.patch("src.database.postgres_util.PostgresUtil"), \
+                mock.patch.object(rb, "run_batch", return_value=result), \
+                mock.patch.object(rb, "format_report", return_value=""), \
+                mock.patch.object(sys, "argv", ["run_mm_meta_binding", "--env", "dev"]):
+            return rb.main()
+
+    def test_all_ok_is_zero(self) -> None:
+        self.assertEqual(self._main(judged_failed=0, describe={"failed": 0}), 0)
+
+    def test_judgement_failure_is_nonzero(self) -> None:
+        self.assertEqual(self._main(judged_failed=2, describe={"failed": 0}), 1)
+
+    def test_describe_failure_is_also_nonzero(self) -> None:
+        # 이 경로가 예전에는 0 이었다 — 설명 생성이 전부 실패해도 성공으로 보였다.
+        self.assertEqual(self._main(judged_failed=0, describe={"failed": 3}), 1)
+
+    def test_describe_skipped_is_zero(self) -> None:
+        # 설명 단계를 끈 경우(None)에 .get 을 부르면 터진다 — 그것도 막는다.
+        self.assertEqual(self._main(judged_failed=0, describe=None), 0)
 
 
 if __name__ == "__main__":
