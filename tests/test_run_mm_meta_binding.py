@@ -12,6 +12,10 @@
   4. **실패 격리·이력 규율**: 판정 실패·전송 예외는 자산 하나만 건너뛰고, 실패는 **저장하지 않는다**
      (이력 미기록 = 다음 배치 재대상 · spec §2).
   5. ``--dry-run``(쓰기 0)·재실행 멱등·diff 리포트 집계.
+  6. **타입 어휘 배선**(F05 · spec §10): 어휘는 배치 시작에 **한 번**, 색인과 **같은 트랜잭션**에서
+     읽어 판정(``type_defs=``)에 싣고, 그 어휘로 정한 문안 판(``prompt_version_for``)을
+     **재선별 술어와 저장 스탬프 양쪽**에 같은 값으로 쓴다. 🔴 둘이 갈리면 매 배치가 같은 자산을
+     영원히 다시 판정한다(DAG 가 자기 자신을 다시 깨우는 연속 드레인이라 끝나지도 않는다).
 
 설계 경계(docs/테스트_가이드.md §0): 조립부(``run_binding``·``run_describe``)는 DB·LLM 을 아예 모르고,
 실제 커넥션·클라이언트는 ``main`` 만 잡는다(실행은 사람 · ``run_opensearch_resync`` 선례와 동형).
@@ -27,10 +31,13 @@ from unittest import mock
 
 from processing.app import run_mm_meta_binding as rb
 from src.mm_meta import (
+    ENTITY_TYPE_DEFS,
     LINEAGE_ACTIVITY,
     PROMPT_VERSION,
+    PROMPT_VERSION_WITHOUT_TYPE_DEFS,
     RULE_VERSION,
     EntityJudgement,
+    EntityTypeDef,
     ExtractedEntity,
     JudgeFailure,
 )
@@ -123,6 +130,13 @@ class _FakeCursor:
 
     def fetchall(self) -> list[dict[str, Any]]:
         return list(self._rows)
+
+    def fetchone(self) -> dict[str, Any] | None:
+        """단일 행 조회(타입 어휘 ``fetch_meta_type_vocab`` 이 쓰는 모양).
+
+        준비된 행이 없으면 ``None`` — 코어 계약상 "등록 행 없음"이라 코드 프리셋 폴백이 된다.
+        """
+        return dict(self._rows[0]) if self._rows else None
 
 
 class _FakeConn:
@@ -699,6 +713,218 @@ class TestParser(unittest.TestCase):
         self.assertTrue(args.rejudge)
         self.assertTrue(args.no_describe)
         self.assertEqual(args.asset_ids, [_A1])
+
+
+# ── F05 타입 어휘 배선 ──────────────────────────────────────────────────────────
+def _registered_defs() -> tuple[EntityTypeDef, ...]:
+    """**등록 행에서 온 것처럼 보이는** 정의문 묶음(코드 프리셋과 다른 인스턴스).
+
+    코어 ``fetch_meta_type_vocab`` 은 등록 행이면 새로 만든 튜플을, 행이 없으면 코드 프리셋
+    ``ENTITY_TYPE_DEFS`` **그 객체**를 돌려준다 — 러너는 그 차이로 어휘 출처를 리포트에 적는다.
+
+    Returns:
+        닫힌 5종 정의문 튜플(내용은 프리셋과 달라도 배선 검증에는 상관없다).
+    """
+    return tuple(
+        EntityTypeDef(code=d.code, name=d.name, definition="등록 정의", exclusion="등록 경계")
+        for d in ENTITY_TYPE_DEFS
+    )
+
+
+class TestTypeVocabInRunBinding(unittest.TestCase):
+    """어휘가 판정까지 흐르고, 스탬프가 **그 어휘로부터** 정해지는가(F05 잔여 ①)."""
+
+    def test_type_defs_reach_the_judge(self) -> None:
+        # 설정만 바꾸고 소비처가 없어 조용히 무동작이 되는 결함(MM_META_JUDGE_SUMMARY_CHARS 류)의
+        # 재발 방지 — 어휘가 실제로 판정 함수까지 가야 정의문이 프롬프트에 실린다.
+        defs = _registered_defs()
+        seen: dict[str, Any] = {}
+
+        def _judge(summary, keywords, **kwargs):  # noqa: ARG001
+            seen.update(kwargs)
+            return _ok()
+
+        rb.run_binding(
+            [_material(_A1)],
+            mode=rb.DISCOVERY_AUTO,
+            type_defs=defs,
+            judge_fn=_judge,
+            persist_fn=_FakePersist(),
+        )
+        self.assertIs(seen["type_defs"], defs)
+
+    def test_no_type_defs_keeps_current_prompt(self) -> None:
+        # 미주입이 곧 기존 동작이다(코어 하위호환 계약) — 판정에 None 이 그대로 간다.
+        seen: dict[str, Any] = {}
+
+        def _judge(summary, keywords, **kwargs):  # noqa: ARG001
+            seen.update(kwargs)
+            return _ok()
+
+        rb.run_binding(
+            [_material(_A1)], mode=rb.DISCOVERY_AUTO, judge_fn=_judge, persist_fn=_FakePersist()
+        )
+        self.assertIsNone(seen["type_defs"])
+
+    def test_report_stamps_the_version_of_the_prompt_it_built(self) -> None:
+        # 🔴 문안 v1 인데 스탬프만 v2 로 찍히면 정의문 효과 확인·재판정 범위 산정이 불가능하다.
+        with_defs = rb.run_binding(
+            [_material(_A1)],
+            mode=rb.DISCOVERY_AUTO,
+            type_defs=_registered_defs(),
+            judge_fn=lambda *a, **k: _ok(),
+            persist_fn=_FakePersist(),
+        )
+        without = rb.run_binding(
+            [_material(_A1)],
+            mode=rb.DISCOVERY_AUTO,
+            judge_fn=lambda *a, **k: _ok(),
+            persist_fn=_FakePersist(),
+        )
+        self.assertEqual(with_defs["prompt_version"], PROMPT_VERSION)
+        self.assertEqual(without["prompt_version"], PROMPT_VERSION_WITHOUT_TYPE_DEFS)
+
+    def test_vocab_source_labels_registered_preset_and_absent(self) -> None:
+        # 운영자가 "등록한 정의문이 적용됐나"를 리포트만 보고 알아야 한다.
+        self.assertEqual(rb.vocab_source_of(_registered_defs()), rb.VOCAB_SOURCE_REGISTERED)
+        self.assertEqual(rb.vocab_source_of(ENTITY_TYPE_DEFS), rb.VOCAB_SOURCE_PRESET)
+        self.assertEqual(rb.vocab_source_of(None), rb.VOCAB_SOURCE_NONE)
+        self.assertEqual(rb.vocab_source_of(()), rb.VOCAB_SOURCE_NONE)
+
+    def test_report_carries_vocab_source_and_count(self) -> None:
+        report = rb.run_binding(
+            [_material(_A1)],
+            mode=rb.DISCOVERY_AUTO,
+            type_defs=ENTITY_TYPE_DEFS,
+            judge_fn=lambda *a, **k: _ok(),
+            persist_fn=_FakePersist(),
+        )
+        self.assertEqual(report["vocab_source"], rb.VOCAB_SOURCE_PRESET)
+        self.assertEqual(report["type_defs"], len(ENTITY_TYPE_DEFS))
+
+    def test_format_report_shows_vocab_source_and_version(self) -> None:
+        preset = rb.format_report({
+            "mode": rb.DISCOVERY_AUTO, "vocab_source": rb.VOCAB_SOURCE_PRESET,
+            "type_defs": 5, "prompt_version": PROMPT_VERSION,
+        })
+        self.assertIn("프리셋", preset)
+        self.assertIn(PROMPT_VERSION, preset)
+        registered = rb.format_report({
+            "mode": rb.DISCOVERY_AUTO, "vocab_source": rb.VOCAB_SOURCE_REGISTERED,
+            "type_defs": 5, "prompt_version": PROMPT_VERSION,
+        })
+        self.assertIn("등록", registered)
+
+
+class _TxDB:
+    """트랜잭션마다 **새 커넥션**을 주는 DB 더블 — "같은 트랜잭션인가"를 객체 동일성으로 검증한다.
+
+    ``_FakeDB`` 는 커넥션 하나를 재사용해 그 질문에 답할 수 없다(무엇을 부르든 같은 객체다).
+    """
+
+    def __init__(self) -> None:
+        self.conns: list[_FakeConn] = []
+
+    def execute_in_transaction(self, fn, idempotent=True):  # noqa: ARG002 — 서명 호환만
+        conn = _FakeConn()
+        self.conns.append(conn)
+        return fn(conn)
+
+
+class TestTypeVocabWiringInRunBatch(unittest.TestCase):
+    """🔴 배치 배선 — 어휘는 배치당 1회·색인과 한 트랜잭션, 스탬프는 술어와 **같은 값**."""
+
+    def _patches(self, *, targets, vocab=None, settings=None):
+        """배치가 부르는 DB·LLM 경계를 전부 가짜로 바꾼다(어휘 조회 포함)."""
+        judged = _ok(ExtractedEntity(keyword="k", name="제주도", entity_type="장소"))
+        return {
+            "vocab": mock.patch.object(
+                rb, "fetch_meta_type_vocab",
+                return_value=_registered_defs() if vocab is None else vocab),
+            "official": mock.patch.object(rb, "fetch_official_name_index", return_value={}),
+            "alias": mock.patch.object(rb, "fetch_registered_alias_index", return_value={}),
+            "targets": mock.patch.object(rb, "fetch_binding_targets", return_value=targets),
+            "kind": mock.patch.object(rb, "ensure_mm_member_kind", return_value="k1"),
+            "judge": mock.patch.object(rb, "judge_asset_entities", return_value=judged),
+            "persist": mock.patch.object(
+                rb, "upsert_entity_edges",
+                return_value={"edges_deleted": 0, "edges_inserted": 1, "entities": []}),
+            "desc": mock.patch.object(rb, "fetch_meta_description_targets", return_value=[]),
+            "orphan": mock.patch.object(rb, "fetch_orphan_metas", return_value=[]),
+            "cfg": mock.patch("src.config.settings.get_current_settings",
+                              return_value=settings or _settings()),
+        }
+
+    def _run(self, patches, db=None, **kwargs):
+        """패치를 모두 걸고 배치를 한 판 돌린다."""
+        db = db if db is not None else _FakeDB()
+        with patches["vocab"] as m_vocab, patches["official"] as m_off, patches["alias"], \
+                patches["targets"] as m_targets, patches["kind"], patches["judge"] as m_judge, \
+                patches["persist"] as m_persist, patches["desc"], patches["orphan"], \
+                patches["cfg"]:
+            result = rb.run_batch(db, mode=rb.DISCOVERY_AUTO, **kwargs)
+        return result, {"vocab": m_vocab, "official": m_off, "targets": m_targets,
+                        "judge": m_judge, "persist": m_persist}
+
+    def test_vocab_read_once_in_the_index_transaction(self) -> None:
+        # 자산 루프 안에서 읽으면 자산 수만큼 질의가 는다(색인 2벌과 같은 규율).
+        db = _TxDB()
+        patches = self._patches(targets=[_material(_A1), _material(_A2), _material(_A3)])
+        _result, mocks = self._run(patches, db=db)
+        self.assertEqual(mocks["vocab"].call_count, 1)
+        # 색인과 **같은 커넥션** = 같은 읽기 트랜잭션(대상 목록과 어휘가 갈리지 않는다).
+        self.assertIs(mocks["vocab"].call_args.args[0], mocks["official"].call_args.args[0])
+
+    def test_type_defs_reach_the_judge_through_run_batch(self) -> None:
+        defs = _registered_defs()
+        patches = self._patches(targets=[_material(_A1)], vocab=defs)
+        _result, mocks = self._run(patches)
+        self.assertIs(mocks["judge"].call_args.kwargs["type_defs"], defs)
+
+    def test_selection_predicate_and_persist_stamp_share_one_version(self) -> None:
+        # 🔴 무한 재판정 봉인 — 대상 선별이 v2 로 비교하는데 저장 스탬프가 v1 이면(또는 그 반대)
+        #    매 배치가 같은 자산을 영원히 다시 집는다.
+        patches = self._patches(targets=[_material(_A1)])
+        result, mocks = self._run(patches)
+        selected = mocks["targets"].call_args.kwargs["prompt_version"]
+        stamped = mocks["persist"].call_args.kwargs["prompt_version"]
+        self.assertEqual(selected, stamped)
+        self.assertEqual(selected, result["binding"]["prompt_version"])
+        self.assertEqual(selected, PROMPT_VERSION)   # 정의문을 실었으니 v2
+
+    def test_fallback_preset_also_keeps_predicate_and_stamp_together(self) -> None:
+        # 폴백(등록 행 없음)도 정의문을 싣는다(코드 프리셋이 v2 문안이다) → 두 값이 함께 움직인다.
+        patches = self._patches(targets=[_material(_A1)], vocab=ENTITY_TYPE_DEFS)
+        result, mocks = self._run(patches)
+        self.assertEqual(mocks["targets"].call_args.kwargs["prompt_version"],
+                         mocks["persist"].call_args.kwargs["prompt_version"])
+        self.assertEqual(result["binding"]["vocab_source"], rb.VOCAB_SOURCE_PRESET)
+        self.assertEqual(result["binding"]["prompt_version"], PROMPT_VERSION)
+
+    def test_registered_vocab_is_reported_as_registered(self) -> None:
+        patches = self._patches(targets=[_material(_A1)])
+        result, _mocks = self._run(patches)
+        self.assertEqual(result["binding"]["vocab_source"], rb.VOCAB_SOURCE_REGISTERED)
+        self.assertEqual(result["binding"]["type_defs"], len(ENTITY_TYPE_DEFS))
+
+    def test_dry_run_still_loads_vocab_and_stamps_the_report(self) -> None:
+        # 미리보기도 "무슨 문안으로 판정되나"를 보여 줘야 한다(어휘 조회는 읽기 전용이라 안전하다).
+        patches = self._patches(targets=[_material(_A1)])
+        result, mocks = self._run(patches, dry_run=True)
+        mocks["persist"].assert_not_called()
+        self.assertEqual(mocks["vocab"].call_count, 1)
+        self.assertEqual(result["binding"]["prompt_version"], PROMPT_VERSION)
+
+
+class TestFetchTargetsPromptVersion(unittest.TestCase):
+    """재선별 술어의 ``pv`` 는 **주입**된다 — 판정 문안과 갈리지 않게 호출부가 정한다."""
+
+    def test_injected_prompt_version_is_bound(self) -> None:
+        conn = _FakeConn([])
+        rb.fetch_binding_targets(conn, prompt_version=PROMPT_VERSION_WITHOUT_TYPE_DEFS)
+        _sql, params = conn.executed[0]
+        self.assertIn(PROMPT_VERSION_WITHOUT_TYPE_DEFS, params)
+        self.assertNotIn(PROMPT_VERSION, params)
 
 
 if __name__ == "__main__":
