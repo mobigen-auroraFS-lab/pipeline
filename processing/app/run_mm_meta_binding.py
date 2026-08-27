@@ -72,6 +72,7 @@ from src.mm_meta import (
     judge_asset_entities,
     prompt_version_for,
     resolve_registered_aliases,
+    type_names,
     upsert_entity_edges,
     upsert_meta_description,
 )
@@ -754,6 +755,9 @@ def run_batch(
     type_defs, prompt_version, official_index, alias_index, materials = db.execute_in_transaction(
         _load, idempotent=True
     )
+    # 등록 어휘에서 허용 타입 집합을 **한 번** 만든다 — 프롬프트·응답 필터·쓰기 게이트가 같은
+    # 값을 쓴다(따로 계산하면 갈리고, 갈리면 늘린 타입이 조용히 떨어진다 · spec 087).
+    allowed_types = type_names(type_defs)
     if mode == DISCOVERY_PROPOSE and materials and not alias_index:
         # 등록 메타 0 은 **정상 상태**다(등록 전) — 다만 이번 배치는 소속을 하나도 만들지 못하고
         # 후보 리포트만 낸다. 조용히 지나가면 "왜 묶음이 안 생기나"를 코드에서 찾게 된다.
@@ -779,8 +783,14 @@ def run_batch(
             # 🔴 ``prompt_version`` 을 **명시**한다. 코어 기본값은 모듈 상수(현행 최신 판)라, 정의문
             #    없이 나간 판정도 최신 판으로 찍힌다 — 위 ``_load`` 가 정한 값(= 재선별 술어와 같은
             #    값)만 스탬프에 남긴다. 그래야 문안과 판이 항상 일치한다.
+            # 🔴 ``allowed_types`` 도 **명시**한다(spec 087 T011). 코어 기본값은 코드 프리셋이라,
+            #    등록 어휘를 늘려도 쓰기 게이트가 옛 어휘로 막는다 — 판정은 통과한 `음식` 개체가
+            #    저장 직전에 예외로 떨어졌다(2026-08-27 실측). 프롬프트에 실은 어휘와 쓰기 게이트가
+            #    같아야 한다: 두 값 다 위 ``_load`` 가 읽은 ``type_defs`` 하나에서 나온다.
             lambda conn, _aid=asset_id, _ents=entities: upsert_entity_edges(
-                conn, _aid, _ents, prompt_version=prompt_version
+                conn, _aid, _ents,
+                prompt_version=prompt_version,
+                allowed_types=allowed_types,
             ),
             idempotent=False,
         )
