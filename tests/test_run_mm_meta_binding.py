@@ -192,9 +192,21 @@ class TestRunBindingPipelineOrder(unittest.TestCase):
     """판정 → 규칙 → 별칭 → 저장 — 한 단계도 건너뛰지 않는다."""
 
     def test_rules_applied_between_judge_and_persist(self) -> None:
-        # '대한민국'(광역 제외)·'올림픽 정식 종목'(스톱패턴)은 규칙에서 떨어지고 '제주도'만 남는다.
+        """판정 결과가 **규칙을 거쳐** 저장으로 간다 — 한 단계도 건너뛰지 않는다.
+
+        🔴 제외 예시가 `대한민국` → `북극` 으로 바뀐 이유(087 T005 · 코어 커밋 `5fd8f4f`):
+        광역 제외 20종 중 **19종이 코드 목록에서 '장소' 정의문(LLM 프롬프트)으로 이관**됐고,
+        코드에는 `북극` 하나만 남았다("북극은 빼고 남극은 남긴다"는 **의미가 아니라 정책**이라
+        LLM 이 맞추지 못한 유일한 항목이다).
+
+        이 테스트는 ``judge_fn`` 을 가짜로 주입해 LLM 을 우회하므로 **정의문이 개입할 자리가 없다.**
+        그래서 `대한민국` 을 넣으면 규칙이 걸러내지 못해 실패한다 — 코어는 갱신됐는데 이 파이프
+        테스트가 함께 갱신되지 않아 남아 있던 것을 2026-09-01 에 맞췄다.
+        검증 의도(규칙 단계가 실제로 돈다)는 그대로다.
+        """
+        # '북극'(코드 목록 유일 잔존)·'올림픽 정식 종목'(스톱패턴)은 규칙에서 떨어지고 '제주도'만 남는다.
         judged = _ok(
-            ExtractedEntity(keyword="대한민국", name="대한민국", entity_type="장소"),
+            ExtractedEntity(keyword="북극", name="북극", entity_type="장소"),
             ExtractedEntity(keyword="올림픽 정식 종목", name="올림픽", entity_type="사건"),
             ExtractedEntity(keyword="제주 장마", name="제주도", entity_type="장소"),
         )
