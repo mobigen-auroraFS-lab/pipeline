@@ -15,31 +15,22 @@
 from __future__ import annotations
 
 import uuid
-from enum import Enum
 from typing import Any
 
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from src.domain.status_vocab import AssetStatus as _AssetStatus
 
 # ⚠️ ``StrEnum`` 으로 바꾸지 않는다(UP042 억제) — ``str(...)`` 결과가 달라진다.
 #    지금은 ``"AssetStatus.RECEIVED"``, StrEnum 이면 ``"received"`` 다. 로그·f-string 에
 #    그대로 찍히는 값이라 바꾸려면 소비처를 훑고 별건으로 다뤄야 한다(DB 바인딩은 양쪽 동일).
-class AssetStatus(str, Enum):  # noqa: UP042
-    """``asset.status`` CHECK 제약과 동일한 값 (v160).
-
-    정상 경로: received → routing → classifying → extracting → registered.
-    진행형 마커는 단계 **진입 시** set_status, 종착(registered/deferred/failed)만 **완료 후** 기록.
-    ``tests/test_status_vocab`` 에서 CHECK 집합 교차 검증 — 신규 값은 DDL·ALLOWED_TRANSITIONS 동시 갱신.
-    """
-
-    RECEIVED = "received"  # 파일 픽업·asset 행 생성 직후(오케스트레이터 진입점).
-    ROUTING = "routing"  # route_file 완료 마커 — classifying 과 동트랜잭션·단독 관측 드묾.
-    CLASSIFYING = "classifying"  # 도메인·modality 분류 진행 중.
-    EXTRACTING = "extracting"  # extract·embed·persist 스킬 실행 중.
-    REGISTERED = "registered"  # 적재 완료·종착 — 포탈·검색·관계 배치 노출 대상.
-    FAILED = "failed"  # 임의 비종료 단계에서 오류 종착 — status_reason 에 사유.
-    DEFERRED = "deferred"  # 의료 표준 포맷(DICOM/HL7/FHIR) 추출 보류·종착(실패 아님, 단계 D 대기).
+# 🔴 **값 목록은 코어 정본을 쓴다**(2026-09-02). 전에는 이 파일이 값까지 소유했는데, 그러면
+#    백엔드가 가져다 쓸 길이 없어(3레포 구조상 service 는 pipeline 을 의존하지 않는다) 상태
+#    문자열을 17곳에 직접 타이핑하게 된다. **값은 읽는 쪽도 쓰므로 공유 코어**에 두고,
+#    **전이 규칙(FSM)은 상태를 바꾸는 이 레포**가 계속 소유한다.
+#    아래 재수출 덕분에 기존 ``from processing.ingest.status import AssetStatus`` 는 그대로 돈다.
+AssetStatus = _AssetStatus
 
 
 # 불변식: TERMINAL 상태는 ALLOWED_TRANSITIONS 에서 빈 집합을 가져야 한다.
