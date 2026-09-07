@@ -34,6 +34,7 @@ from processing.pipeline import builtins as _builtins  # noqa: F401 — DEFAULT_
 from processing.pipeline.packs import for_domain
 from processing.pipeline.policy import validate as policy_validate
 from processing.pipeline.registry import DEFAULT_REGISTRY
+from src.database.lineage_activity import LineageActivity  # 계보 활동명 정본(3레포 공용)
 from src.database.lineage_persist import record_lineage
 from src.database.postgres_util import PostgresUtil
 from src.file.file_type_defs import modality_of  # 저장·기록에 쓸 큰 갈래 매핑
@@ -165,7 +166,7 @@ def collect_file(conn: Connection[Any], fs_path: str) -> CollectResult:
     )
     # 기록에도 큰 갈래로 좁힌 모달리티를 남긴다(집계와 어긋나지 않게). 세부 종류가 필요하면
     # 함께 남긴 경로의 확장자에서 다시 구할 수 있다.
-    record_lineage(conn, asset_id, activity="ingest.received.v1", agent="run_ingest",
+    record_lineage(conn, asset_id, activity=LineageActivity.INGEST_RECEIVED, agent="run_ingest",
                    generated={"modality": modality_of(route.modality)}, payload={"fs_path": fs_path})
     return CollectResult(asset_id=asset_id, route=route, skip_reason=None)
 
@@ -217,9 +218,9 @@ def process_asset(
     #  - classifying: 바로 아래 실분류(cascade) 진입 직전을 정확히 반영.
     with db.transaction() as conn:
         set_status(conn, asset_id, AssetStatus.ROUTING)
-        record_lineage(conn, asset_id, activity="ingest.routing.v1", agent="run_ingest")
+        record_lineage(conn, asset_id, activity=LineageActivity.INGEST_ROUTING, agent="run_ingest")
         set_status(conn, asset_id, AssetStatus.CLASSIFYING)
-        record_lineage(conn, asset_id, activity="ingest.classifying.v1", agent="run_ingest")
+        record_lineage(conn, asset_id, activity=LineageActivity.INGEST_CLASSIFYING, agent="run_ingest")
 
     # 2) 도메인 분류: override 우선, 없으면 레지스트리 기본 분류기(ctx 기반)
     ctx = ExtractContext(file_path=fs_path, modality=modality, domain=domain, settings=settings, db=db)
@@ -229,7 +230,7 @@ def process_asset(
         classification = registry.resolve("classify", "cascade_v1")(ctx)
     with db.transaction() as conn:
         record_classification(conn, asset_id, classification)
-        record_lineage(conn, asset_id, activity="ingest.classified.v1",
+        record_lineage(conn, asset_id, activity=LineageActivity.INGEST_CLASSIFIED,
                        agent=("classify_fn" if classify_fn is not None else "cascade_v1"),
                        generated={"final_label": classification.final_label,
                                   "decided_stage": classification.decided_stage,
@@ -247,7 +248,7 @@ def process_asset(
     if signature:
         with db.transaction() as conn:
             set_status(conn, asset_id, AssetStatus.DEFERRED, reason=f"{domain}_format:{signature}")
-            record_lineage(conn, asset_id, activity="ingest.deferred.v1", agent="run_ingest",
+            record_lineage(conn, asset_id, activity=LineageActivity.INGEST_DEFERRED, agent="run_ingest",
                            payload={"domain": domain, "signature": signature})
         _LOG.info("deferred(%s/%s): asset_id=%s %s", domain, signature, asset_id, fs_path)
         return "deferred"
@@ -258,7 +259,7 @@ def process_asset(
 
     with db.transaction() as conn:
         set_status(conn, asset_id, AssetStatus.EXTRACTING)
-        record_lineage(conn, asset_id, activity="ingest.extracting.v1", agent="run_ingest")
+        record_lineage(conn, asset_id, activity=LineageActivity.INGEST_EXTRACTING, agent="run_ingest")
 
     # 3) 추출/임베딩 — override(full record) 또는 팩 경로(extract_meta + embed)
     if extract_fn is not None:
@@ -274,7 +275,7 @@ def process_asset(
         # 확장 메타 키·값 검증 — 열람 등급은 여기서 검사하지 않는다(읽기 경로 소관).
         validate_ext_meta(conn, domain, record.ext_meta)
         finalize_asset(conn, asset_id, record)
-        record_lineage(conn, asset_id, activity="ingest.registered.v1",
+        record_lineage(conn, asset_id, activity=LineageActivity.INGEST_REGISTERED,
                        agent=("extract_fn" if extract_fn is not None else pack.per_asset["extract"]),
                        generated={"channels": sorted({e.channel for e in record.embeddings}),
                                   "n_embeddings": len(record.embeddings),

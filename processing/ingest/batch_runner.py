@@ -37,17 +37,18 @@ from processing.ingest.pipeline_steps import OsIndexFn, _make_opensearch_indexer
 from processing.ingest.router import route_file
 from processing.ingest.status import AssetStatus, InvalidTransitionError, mark_failed
 from processing.pipeline.registry import DEFAULT_REGISTRY
+from src.database.lineage_activity import LineageActivity  # 계보 활동명 정본(3레포 공용)
 from src.database.lineage_persist import record_lineage
 
 _LOG = logging.getLogger("meta_extract.batch_runner")
 
 # 재시도 cap 카운트 소스 — 자산 처리 실패 활동(run_ingest CLI·dag_process 공통 기록).
-FAILED_ACTIVITY = "ingest.failed.v1"
+FAILED_ACTIVITY = LineageActivity.INGEST_FAILED  # 값은 "ingest.failed.v1" — 정본은 코어
 
 # 크래시 루프 cap 카운트 소스 — 고착 자산의 received 리셋 활동. 하드 크래시(OOM-kill/SIGKILL/
 # 네이티브 segfault)는 예외 핸들러(_handle_failure)가 못 돌아 FAILED_ACTIVITY 가 안 남으므로,
 # 리셋마다 이 활동을 남겨 실패 수와 합산해 무한 재처리를 차단한다(불변식 #2·#3 통합).
-RESET_ACTIVITY = "ingest.reset.v1"
+RESET_ACTIVITY = LineageActivity.INGEST_RESET  # 값은 "ingest.reset.v1" — 정본은 코어
 # 리셋 cap 도달 시 종료 격리 사유 — 비식별(헌법 10조·예외 메시지/경로 없음).
 RESET_CAP_REASON = "reset_cap_exceeded"
 
