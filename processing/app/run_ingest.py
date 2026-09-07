@@ -42,6 +42,7 @@ from processing.pipeline import (
 )
 from processing.pipeline.registry import DEFAULT_REGISTRY
 from src.config.settings import get_current_settings
+from src.database.lineage_activity import LineageActivity  # 계보 활동명 정본(3레포 공용)
 from src.database.lineage_persist import record_lineage
 from src.database.postgres_util import PostgresUtil
 
@@ -129,7 +130,7 @@ def run_ingest(
                 with db.transaction() as conn:
                     try:
                         mark_failed(conn, asset_id, reason)
-                        record_lineage(conn, asset_id, activity="ingest.failed.v1", agent="run_ingest",
+                        record_lineage(conn, asset_id, activity=LineageActivity.INGEST_FAILED, agent="run_ingest",
                                        payload={"reason": reason})
                     except InvalidTransitionError:
                         # 이미 종료 상태면 무시. 동시 전이 충돌(조건부 UPDATE 0행 —
