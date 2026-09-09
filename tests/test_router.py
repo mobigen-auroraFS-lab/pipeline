@@ -13,6 +13,8 @@ from unittest import mock
 
 from processing.ingest import router
 from processing.ingest.router import (
+    LEDGER_FILE_NAMES,
+    REASON_LEDGER_FILE,
     REASON_MISSING,
     REASON_UNKNOWN_MODALITY,
     route_file,
@@ -50,6 +52,24 @@ class TestRouteFile(RouterTestBase):
             self.assertEqual(r.modality, kind)
             self.assertEqual(r.reason, "")
             self.assertEqual(r.domain, "general")
+
+    def test_ledger_file_not_routable(self) -> None:
+        # 수집 도구의 목록 파일(manifest.json · _manifest.json)은 자산이 아니다 — 종류 판정 전에 걸러
+        # 'ledger_file' 사유로 skip 한다. 통과시키면 json 텍스트 자산이 돼 모든 검색에 걸린다(2026-09-09 실측).
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as d:
+            for name in sorted(LEDGER_FILE_NAMES) + ["MANIFEST.JSON"]:
+                f = Path(d) / name
+                f.write_text('{"files": []}', encoding="utf-8")
+                r = route_file(f)
+                self.assertFalse(r.routable, name)
+                self.assertEqual(r.reason, REASON_LEDGER_FILE, name)
+            # 이름이 정확히 같을 때만 — 비슷한 이름의 정상 자료는 걸리지 않는다(닫힌 목록).
+            g = Path(d) / "데이터_manifest.json"
+            g.write_text('{"a": 1}', encoding="utf-8")
+            self.assertNotEqual(route_file(g).reason, REASON_LEDGER_FILE)
 
     def test_domain_passthrough(self) -> None:
         with mock.patch.object(router, "detect_file_kind", return_value="txt"):
