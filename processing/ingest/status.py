@@ -22,9 +22,10 @@ from psycopg.rows import dict_row
 
 from src.domain.status_vocab import AssetStatus as _AssetStatus
 
-# ⚠️ ``StrEnum`` 으로 바꾸지 않는다(UP042 억제) — ``str(...)`` 결과가 달라진다.
-#    지금은 ``"AssetStatus.RECEIVED"``, StrEnum 이면 ``"received"`` 다. 로그·f-string 에
-#    그대로 찍히는 값이라 바꾸려면 소비처를 훑고 별건으로 다뤄야 한다(DB 바인딩은 양쪽 동일).
+# ⚠️ 이 이름은 이제 코어의 ``StrEnum`` 을 **그대로 재수출**한다 — 그래서 ``str(AssetStatus.RECEIVED)``
+#    는 ``"received"`` 다(옛 ``(str, Enum)`` 시절의 ``"AssetStatus.RECEIVED"`` 가 아니다). 로그·
+#    f-string 에 그대로 찍히는 값이라 이관 때 소비처를 전수 확인했다 — 이 레포는 어디서나 ``.value``
+#    또는 이미 문자열인 변수만 쓰므로 영향이 없다(리뷰 2026-09-09 · ``tests/test_status.py`` 가 봉인).
 # 🔴 **값 목록은 코어 정본을 쓴다**(2026-09-02). 전에는 이 파일이 값까지 소유했는데, 그러면
 #    백엔드가 가져다 쓸 길이 없어(3레포 구조상 service 는 pipeline 을 의존하지 않는다) 상태
 #    문자열을 17곳에 직접 타이핑하게 된다. **값은 읽는 쪽도 쓰므로 공유 코어**에 두고,
