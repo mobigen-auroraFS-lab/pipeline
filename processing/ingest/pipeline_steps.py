@@ -28,7 +28,7 @@ from processing.ingest.asset_persist import (
     find_registered_asset_by_hash,
 )
 from processing.ingest.classification_persist import record_classification
-from processing.ingest.router import REASON_MISSING, RouteResult, route_file
+from processing.ingest.router import REASON_LEDGER_FILE, REASON_MISSING, RouteResult, route_file
 from processing.ingest.status import AssetStatus, set_status
 from processing.pipeline import builtins as _builtins  # noqa: F401 — DEFAULT_REGISTRY 등록 부수효과
 from processing.pipeline.packs import for_domain
@@ -148,6 +148,11 @@ def collect_file(conn: Connection[Any], fs_path: str) -> CollectResult:
     route = route_file(fs_path)
     if not route.routable and route.reason == REASON_MISSING:
         _LOG.info("skip(missing): %s", fs_path)
+        return CollectResult(asset_id=None, route=route, skip_reason=route.reason)
+    if not route.routable and route.reason == REASON_LEDGER_FILE:
+        # 장부 파일은 **등록 전에** 건너뛴다. 다른 non-routable(unknown_modality)은 등록 뒤 후속 단계가
+        # 격리하지만, 장부 파일은 자산 행 자체가 남으면 안 된다(남으면 검색 잡음 — 2026-09-09 실측).
+        _LOG.info("skip(ledger_file): %s", fs_path)
         return CollectResult(asset_id=None, route=route, skip_reason=route.reason)
 
     file_hash, file_size = file_hash_and_size(fs_path)
