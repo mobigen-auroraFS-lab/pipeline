@@ -115,5 +115,24 @@ class TestDbHelpers(unittest.TestCase):
             mark_failed(conn, 9, "사유")
 
 
+class TestCoreReexport(unittest.TestCase):
+    """값 이관(2026-09-02)의 봉인 — 이 레포의 ``AssetStatus`` 는 코어 정본 **그 객체**다.
+
+    이관으로 ``str()`` 표현이 바뀌었다(``"AssetStatus.RECEIVED"`` → ``"received"``). 그것이 의도임을
+    여기 못 박아, 누가 다시 자체 Enum 을 만들거나 표현이 조용히 되돌아가면 바로 드러나게 한다.
+    """
+
+    def test_same_object_as_core(self) -> None:
+        from src.domain.status_vocab import AssetStatus as Core
+
+        self.assertIs(AssetStatus, Core)
+
+    def test_str_is_the_plain_value(self) -> None:
+        # 계보 활동명 이관(test_lineage_activity_vocab)과 같은 수준의 봉인 — 표현까지 확인한다.
+        self.assertEqual(str(AssetStatus.RECEIVED), "received")
+        self.assertEqual(f"{AssetStatus.REGISTERED}", "registered")
+        self.assertEqual(AssetStatus.RECEIVED.value, "received")
+
+
 if __name__ == "__main__":
     unittest.main()
