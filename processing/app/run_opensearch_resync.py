@@ -111,6 +111,12 @@ def format_report(report: dict[str, Any], *, doc_count: int | None = None) -> st
         line += f" | 인덱스 총문서: {doc_count}"
     if report["errors"]:
         line += f"\n  ⚠️ 오류 샘플: {report['errors'][:2]}"
+    if report["status"] == "analysis-stale":
+        # 코어 ensure_index 가 알린 어긋남 — 문서는 들어갔지만 옛 분석기로 쪼개져 있다.
+        line += (
+            "\n  🔴 분석기 설정이 코드와 다르다 — 이 색인의 문서는 옛 분석기로 쪼개진다. "
+            "--recreate 로 다시 만들어야 반영된다(재색인 동안 검색이 비어 보인다)."
+        )
     return line
 
 

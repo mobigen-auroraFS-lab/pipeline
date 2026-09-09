@@ -112,6 +112,15 @@ class TestFormatReport(unittest.TestCase):
         self.assertIn("assets", line)
         self.assertIn("st", line)
 
+    def test_warns_when_analysis_stale(self) -> None:
+        # 코어가 'analysis-stale'(분석기가 코드와 다름)을 주면 --recreate 안내를 덧붙인다 —
+        # 이 한 줄이 없으면 운영자는 "재색인했는데 검색이 그대로" 를 설명할 길이 없다.
+        report = {"status": "analysis-stale", "ok": 3, "errors": [], "channel": "st_bge",
+                  "index": "assets", "recreate": False}
+        line = rr.format_report(report)
+        self.assertIn("analysis-stale", line)
+        self.assertIn("--recreate", line)
+
     def test_appends_error_sample_when_errors(self) -> None:
         report = {
             "status": "exists",
