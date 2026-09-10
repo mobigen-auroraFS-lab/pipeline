@@ -104,6 +104,33 @@ def bind_mm_meta(**_context) -> dict[str, int]:
     return summary
 
 
+def embed_entities(**_context) -> dict[str, int]:
+    """묶음이 갱신된 뒤 **개체 임베딩·검색 색인**을 같은 실행 안에서 따라 붙인다(2026-09-10 · 090 결정 변경).
+
+    자산은 「적재=색인」(038)인데 개체는 임베딩·색인이 CLI 전용이라, DAG 가 묶음을 만들어도 개체 화면 검색은
+    옛 상태에 머물렀다(실측: 비운 뒤 옛 개체 82건만 색인에 남아 검색이 비어 보임). CLI ``run_entity_embedding``
+    과 **같은 함수**(``run_embedding_pass``)를 부른다 — 재료가 같은 개체는 재임베딩하지 않아 비용이 작다.
+    DB 에 없는 개체의 색인 문서도 여기서 지운다.
+
+    Returns:
+        개수만 담은 요약(``targets``·``created``·``indexed``·``index_purged``) — 태스크 간 전달 값은 작게.
+    """
+    from processing.app.run_entity_embedding import run_embedding_pass
+    from src.config.settings import init_settings
+    from src.database.postgres_util import PostgresUtil
+    cfg = init_settings(os.environ.get("META_ENV", _DEFAULT_ENV))
+    db = PostgresUtil()
+    with db:
+        report = run_embedding_pass(db, cfg)
+    idx = report.get("index") or {}
+    summary = {"targets": int(report.get("targets", 0)), "created": int(report.get("created", 0)),
+               "indexed": int(idx.get("indexed", 0)), "index_purged": int(idx.get("index_purged", 0))}
+    if "error" in idx:
+        _LOG.warning("개체 색인 실패(임베딩은 저장됨): %s", idx["error"])
+    _LOG.info("embed_entities 완료: %s", summary)
+    return summary
+
+
 def _has_more_mm_meta(**context) -> bool:
     """이번에 판정한 것이 있으면 참 — 자기 자신을 다시 깨워 남은 것을 이어서 소화한다.
 
@@ -118,7 +145,7 @@ def _has_more_mm_meta(**context) -> bool:
 
 with DAG(
     dag_id="dag_mm_meta",
-    description="registered·키워드 보유 자산 → 개체 판정 → mm_member 소속 엣지·메타 설명",
+    description="registered·키워드 보유 자산 → 개체 판정 → mm_member 소속 엣지·메타 설명 → 개체 임베딩·검색 색인",
     schedule=_SCHEDULE,
     start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     catchup=False,            # 과거분 보충 금지 — 무엇이 남았는지는 DB 상태(판정 이력)가 정본이다
@@ -131,4 +158,7 @@ with DAG(
         task_id="gate_more_mm_meta", python_callable=_has_more_mm_meta
     )
     trigger_more = TriggerDagRunOperator(task_id="trigger_more", trigger_dag_id="dag_mm_meta")
+    # 묶음 뒤 개체 임베딩·색인(가지) — 드레인 게이트와 나란히 돌아 드레인을 막지 않는다.
+    embed = PythonOperator(task_id="embed_entities", python_callable=embed_entities)
     bind >> gate_more >> trigger_more
+    bind >> embed
