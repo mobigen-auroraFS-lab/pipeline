@@ -143,7 +143,7 @@ class TestDagBagIntegrity(unittest.TestCase):
                             "gate_more_received", "trigger_more"},
             "dag_relations": {_RELATIONS_TASK, "gate_more_unresolved", "trigger_more"},
             # 084/085: 판정 → 진전 게이트 → 자기 재트리거(연속 드레인 · 관계 DAG 동형).
-            "dag_mm_meta": {_MM_META_TASK, "gate_more_mm_meta", "trigger_more"},
+            "dag_mm_meta": {_MM_META_TASK, "gate_more_mm_meta", "trigger_more", "embed_entities"},
             "dag_mm_classify": {_MM_CLASSIFY_TASK, "gate_more_mm_classify", "trigger_more"},
         }
         for dag_id, tasks in expected_tasks.items():
@@ -415,6 +415,24 @@ class TestThinWrappers(unittest.TestCase):
                                          "describe": None, "orphans": []}):
             summary = cb()
         self.assertEqual(summary["judged"], 0)   # 진전 0 → 드레인 게이트가 막는다
+
+    def test_mm_meta_embed_task_follows_bind_and_delegates(self) -> None:
+        # 2026-09-10 — 개체 임베딩·색인은 CLI 전용(090)에서 DAG 자동으로 바뀌었다. 묶음 뒤에 붙고, 드레인
+        # 게이트와 나란히 돈다(임베딩이 드레인을 막지 않는다). DAG 는 배선을 복사하지 않고 run_embedding_pass 를 부른다.
+        dag = _dagbag().dags["dag_mm_meta"]   # get_dag 는 메타DB 를 조회한다(테스트엔 없음) — 파싱 결과만 본다
+        self.assertIn("embed_entities", dag.get_task(_MM_META_TASK).downstream_task_ids)
+        self.assertNotIn("embed_entities", dag.get_task("gate_more_mm_meta").downstream_task_ids)
+        cb = _callable("dag_mm_meta", "embed_entities")
+        db, _c, _cur = _fake_db()
+        with mock.patch.dict(os.environ, {"META_ENV": "dev"}), \
+                mock.patch("src.config.settings.init_settings", return_value=object()), \
+                mock.patch("src.database.postgres_util.PostgresUtil", return_value=db), \
+                mock.patch("processing.app.run_entity_embedding.run_embedding_pass",
+                           return_value={"targets": 7, "created": 2, "index": {"indexed": 7, "index_purged": 82}}) as m_pass:
+            summary = cb()
+        m_pass.assert_called_once()
+        self.assertIs(m_pass.call_args.args[0], db)
+        self.assertEqual(summary, {"targets": 7, "created": 2, "indexed": 7, "index_purged": 82})
 
     def test_mm_classify_callable_delegates_to_run_batch(self) -> None:
         # 085 T110 — 같은 규율(DAG 에 비즈니스 로직 0).

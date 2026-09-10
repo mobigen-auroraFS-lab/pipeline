@@ -30,7 +30,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from src.config import search_constants
@@ -48,7 +48,12 @@ from src.mm_meta.persist import (
     fetch_meta_members,
 )
 from src.mm_meta.rules import MIN_BUNDLE_SIZE
-from src.search.entity_index import bulk_index_entities, ensure_entity_index, entity_to_doc
+from src.search.entity_index import (
+    bulk_index_entities,
+    delete_entity_doc,
+    ensure_entity_index,
+    entity_to_doc,
+)
 
 # 한 번에 임베딩을 요청할 개수. 개체 재료는 짧아(중위 68자) 배치를 크게 잡아도 요청이 커지지
 # 않지만, 실패 시 다시 보낼 양이 그만큼 늘어난다.
@@ -283,6 +288,144 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def purge_orphan_index_docs(client: Any, index: str, conn: Any) -> int:
+    """DB(``node``)에 없는 개체의 **색인 문서**를 지운다 — PG 고아 정리(``purge_orphan_embeddings``)의 색인 판.
+
+    🔴 왜 따로 필요한가(2026-09-10 실측). 데이터 테이블을 비운 뒤에도 개체 색인에는 옛 개체 82건이 남아, 개체 화면
+    검색이 「DB 에 없는 개체」를 물어 빈 결과를 냈다. PG 쪽 고아 정리만 있고 색인 쪽이 없었던 것이다.
+    색인 문서 수는 개체 수(수백~수천)라 한 번에 읽어 대조한다(1만 개를 넘으면 스크롤로 바꿔야 한다).
+
+    Args:
+        client: OpenSearch 클라이언트.
+        index: 개체 인덱스 이름.
+        conn: DB 커넥션(읽기).
+
+    Returns:
+        지운 문서 수. 인덱스가 없으면 0.
+    """
+    if not client.indices.exists(index=index):
+        return 0
+    rows = conn.execute(
+        "SELECT entity_type, entity_uid FROM node WHERE node_kind='entity'"
+    ).fetchall()
+    keep = {(str(r[0]), str(r[1])) for r in rows}
+    res = client.search(index=index, body={"size": 10000, "_source": ["entity_type", "entity_uid"],
+                                           "query": {"match_all": {}}})
+    removed = 0
+    for hit in res.get("hits", {}).get("hits", []):
+        src = hit.get("_source") or {}
+        key = (str(src.get("entity_type", "")), str(src.get("entity_uid", "")))
+        if key not in keep and delete_entity_doc(client, index, key[0], key[1]):
+            removed += 1
+    return removed
+
+
+def run_embedding_pass(db: Any, cfg: Any, *, min_members: int = MIN_BUNDLE_SIZE, limit: int | None = None,
+                       force: bool = False, dry_run: bool = False, purge: bool = True,
+                       index_name: str | None = search_constants.ENTITY_INDEX_DEFAULT,
+                       embed_fn: Callable[[str], list[float]] | None = None,
+                       client: Any = None) -> dict[str, Any]:
+    """개체 임베딩 한 바퀴 — 고아 정리 → 대상 읽기 → 임베딩 저장 → 검색 엔진 색인(+색인 고아 정리).
+
+    CLI(``main``)와 mm_meta DAG 의 ``embed_entities`` 태스크가 **같은 함수**를 부른다(2026-09-10 · 090 의
+    「CLI 전용」을 「DAG 뒤에 자동」으로 바꾼 것). 자산의 「적재=색인」(038)과 같은 이유 — 묶음만 갱신되고
+    개체 색인이 따라오지 않으면 개체 화면 검색이 조용히 옛 결과를 준다.
+
+    Args:
+        db: ``PostgresUtil``(트랜잭션 seam).
+        cfg: ``init_settings`` 결과(임베딩 API 설정을 읽는다).
+        min_members: 최소 구성 자산 수(화면 노출 임계).
+        limit: 이번에 처리할 개체 상한. ``None`` 이면 전량.
+        force: 재료가 같아도 다시 만든다.
+        dry_run: 임베딩·쓰기·색인 0 — 대상만 본다.
+        purge: 시작 시 PG 고아 정리(색인 고아 정리는 색인 단계에서 함께).
+        index_name: 개체 인덱스. ``None`` 이면 색인을 건너뛴다.
+        embed_fn: 재료 → 벡터. ``None`` 이면 설정의 임베딩 API 를 쓴다(테스트가 갈아끼운다).
+        client: OpenSearch 클라이언트. ``None`` 이면 설정으로 만든다(색인 단계에서만 필요).
+
+    Returns:
+        리포트 dict — ``targets``·``stored_total``·``purged``·``index`` (``indexed``·``index_purged``·``error``) 등.
+    """
+    model_name = cfg.embed.api_model
+
+    def _embed_default(text: str) -> list[float]:
+        """재료 하나를 설정의 임베딩 API 로 임베딩한다(코어 seam 경유).
+
+        Args:
+            text: 검색 재료.
+
+        Returns:
+            모델 원본 차원의 벡터.
+        """
+        from src.embedders.text_embedder_api import embed_texts_api
+        return embed_texts_api([text], base_url=cfg.embed.api_base_url, model=model_name,
+                               api_key=(cfg.embed.api_key or None), timeout_s=cfg.embed.api_timeout_s,
+                               batch_size=1)[0]
+
+    embed = embed_fn or _embed_default
+
+    def _load(conn: Any) -> list[dict[str, Any]]:
+        """대상 개체를 읽기 트랜잭션 한 번에 읽는다.
+
+        Args:
+            conn: DB 커넥션.
+
+        Returns:
+            대상 개체 목록.
+        """
+        return fetch_embedding_targets(conn, min_members=min_members,
+                                       statuses=MM_META_VISIBLE_STATUSES, limit=limit)
+
+    targets = db.execute_in_transaction(_load, idempotent=True)
+
+    def _work(conn: Any) -> dict[str, Any]:
+        """고아를 정리하고 임베딩을 채운다.
+
+        Args:
+            conn: DB 커넥션.
+
+        Returns:
+            배치 리포트(고아 정리 수 포함).
+        """
+        purged = purge_orphan_embeddings(conn) if (purge and not dry_run) else 0
+        member_kw = fetch_member_keywords_all(conn, top_n=DEFAULT_MEMBER_KEYWORDS)
+        rep = run_entity_embedding(conn, targets=targets, embed_fn=embed, model_name=model_name,
+                                   force=force, dry_run=dry_run, member_keywords=member_kw)
+        rep["purged"] = purged
+        rep["stored_total"] = count_entity_embeddings(conn)
+        return rep
+
+    report = db.execute_in_transaction(_work, idempotent=False)
+    report["targets"] = len(targets)
+    report["index"] = None
+    if dry_run or not index_name:
+        return report
+    # 색인 실패는 임베딩 결과를 무르지 않는다(임베딩은 커밋됨 · 색인은 멱등이라 다시 돌리면 된다).
+    try:
+        if client is None:
+            from src.search.opensearch_sync import get_client
+            client = get_client()
+
+        def _index(conn: Any) -> dict[str, Any]:
+            """색인 재료를 읽어 검색 엔진에 싣고, DB 에 없는 개체 문서를 지운다.
+
+            Args:
+                conn: DB 커넥션(읽기).
+
+            Returns:
+                ``sync_entity_index`` 리포트 + ``index_purged``.
+            """
+            idx = sync_entity_index(conn, client=client, index=index_name, targets=targets,
+                                    model_name=model_name)
+            idx["index_purged"] = purge_orphan_index_docs(client, index_name, conn) if purge else 0
+            return idx
+
+        report["index"] = db.execute_in_transaction(_index, idempotent=True)
+    except Exception as exc:                   # noqa: BLE001 — 색인 실패는 배치를 무르지 않는다
+        report["index"] = {"error": str(exc)[:200]}
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     """대상을 읽어 임베딩을 채우고 리포트를 출력한다.
 
@@ -293,131 +436,39 @@ def main(argv: list[str] | None = None) -> int:
         종료 코드 — 실패가 하나라도 있으면 1(배치 모니터가 실패를 놓치지 않게).
     """
     args = _build_parser().parse_args(argv)
-
     from pathlib import Path
 
     from dotenv import load_dotenv
 
     from src.config.settings import init_settings
     from src.database.postgres_util import PostgresUtil
-    from src.embedders.text_embedder_api import embed_texts_api
 
     env_path = Path(__file__).resolve().parents[2] / f".env.{args.env}"
     if env_path.is_file():
         load_dotenv(dotenv_path=env_path, override=False)
     cfg = init_settings(args.env)
-    model_name = cfg.embed.api_model
-
-    def embed_one(text: str) -> list[float]:
-        """재료 하나를 임베딩한다(코어 seam 경유 · 패딩은 저장 함수가 한다).
-
-        Args:
-            text: 검색 재료.
-
-        Returns:
-            모델 원본 차원의 벡터.
-        """
-        return embed_texts_api(
-            [text],
-            base_url=cfg.embed.api_base_url,
-            model=model_name,
-            api_key=(cfg.embed.api_key or None),
-            timeout_s=cfg.embed.api_timeout_s,
-            batch_size=1,
-        )[0]
-
     db = PostgresUtil()
-
-    def _load(conn: Any) -> list[dict[str, Any]]:
-        """대상 개체를 **읽기 트랜잭션 한 번**에 읽는다.
-
-        Args:
-            conn: DB 커넥션.
-
-        Returns:
-            대상 개체 목록.
-        """
-        return fetch_embedding_targets(
-            conn,
-            min_members=args.min_members,
-            # 화면과 같은 기준으로 센다 — 코어 정본 상수를 그대로 쓴다
-            # (`run_entity_label` 은 같은 값을 자기 모듈에 두었으나, 새 배치가
-            #  사본을 하나 더 만들 이유가 없다).
-            statuses=MM_META_VISIBLE_STATUSES,
-            limit=args.limit,
-        )
-
-    targets = db.execute_in_transaction(_load, idempotent=True)
-    print(f"대상 {len(targets)}개체 (구성 자산 {args.min_members}건 이상)"
-          f"{' · dry-run' if args.dry_run else ''}"
-          f"{' · force' if args.force else ''}")
-
-    def _work(conn: Any) -> dict[str, Any]:
-        """고아를 정리하고 임베딩을 채운다.
-
-        Args:
-            conn: DB 커넥션.
-
-        Returns:
-            배치 리포트(고아 정리 수를 포함).
-        """
-        purged = 0
-        if not args.no_purge and not args.dry_run:
-            purged = purge_orphan_embeddings(conn)
-        # 구성 자산 키워드를 **한 번 읽어** 임베딩 재료와 색인 문서 양쪽에 쓴다(같은 값을 두 번
-        # 읽으면 두 곳이 어긋날 수 있다). 집계 한 방이라 개체가 늘어도 쿼리 수가 늘지 않는다.
-        member_kw = fetch_member_keywords_all(conn, top_n=DEFAULT_MEMBER_KEYWORDS)
-        report = run_entity_embedding(
-            conn,
-            targets=targets,
-            embed_fn=embed_one,
-            model_name=model_name,
-            force=args.force,
-            dry_run=args.dry_run,
-            member_keywords=member_kw,
-        )
-        report["purged"] = purged
-        report["stored_total"] = count_entity_embeddings(conn)
-        return report
-
-    report = db.execute_in_transaction(_work, idempotent=False)
+    report = run_embedding_pass(
+        db, cfg, min_members=args.min_members, limit=args.limit, force=args.force, dry_run=args.dry_run,
+        purge=not args.no_purge,
+        index_name=None if args.no_index else (args.index or search_constants.ENTITY_INDEX_DEFAULT),
+    )
+    print(f"대상 {report['targets']}개체 (구성 자산 {args.min_members}건 이상)"
+          f"{' · dry-run' if args.dry_run else ''}{' · force' if args.force else ''}")
     if report.get("purged"):
         print(f"고아 정리   {report['purged']}건")
     print(format_report(report))
     print(f"저장 총계    {report['stored_total']}건")
-
-    # ── 검색 엔진 색인(092) ────────────────────────────────────────────────
-    # 🔴 색인 실패가 임베딩 결과를 무르지 않는다 — 임베딩은 이미 커밋됐고, 색인은 다시 돌리면
-    #    된다(멱등). 여기서 예외를 올리면 "임베딩도 안 된 줄" 알고 전량을 다시 돌리게 된다.
-    if not args.dry_run and not args.no_index:
-        index_name = args.index or search_constants.ENTITY_INDEX_DEFAULT
-        try:
-            from src.search.opensearch_sync import get_client
-
-            client = get_client()
-
-            def _index(conn: Any) -> dict[str, Any]:
-                """색인 재료를 읽어 검색 엔진에 싣는다.
-
-                Args:
-                    conn: DB 커넥션(읽기 전용).
-
-                Returns:
-                    ``sync_entity_index`` 리포트.
-                """
-                return sync_entity_index(conn, client=client, index=index_name,
-                                         targets=targets, model_name=model_name)
-
-            idx = db.execute_in_transaction(_index, idempotent=True)
-            print(f"색인        {idx['indexed']}건 → {index_name} ({idx['elapsed_s']}초)"
-                  + (f" · 벡터 없어 건너뜀 {idx['skipped_no_vector']}건"
-                     if idx["skipped_no_vector"] else ""))
-        except Exception as exc:                   # noqa: BLE001 — 색인 실패는 배치를 무르지 않는다
-            print(f"⚠️ 색인 실패(임베딩은 저장됨 · 다시 돌리면 된다): {exc}", file=sys.stderr)
-
+    idx = report.get("index")
+    if idx and "error" in idx:
+        print(f"⚠️ 색인 실패(임베딩은 저장됨 · 다시 돌리면 된다): {idx['error']}", file=sys.stderr)
+    elif idx:
+        print(f"색인        {idx['indexed']}건 → {args.index or search_constants.ENTITY_INDEX_DEFAULT} "
+              f"({idx['elapsed_s']}초)"
+              + (f" · 벡터 없어 건너뜀 {idx['skipped_no_vector']}건" if idx.get("skipped_no_vector") else "")
+              + (f" · 색인 고아 정리 {idx['index_purged']}건" if idx.get("index_purged") else ""))
     db.close()
     return 1 if report["failed"] else 0
-
 
 if __name__ == "__main__":
     sys.exit(main())
