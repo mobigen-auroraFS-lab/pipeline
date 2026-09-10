@@ -31,7 +31,8 @@ class _Client:
         return id in self._ids
 
     def delete(self, index: str, id: str) -> None:  # noqa: A002
-        self.deleted.append(id); self._ids.pop(id, None)
+        self.deleted.append(id)
+        self._ids.pop(id, None)
 
 
 class _Conn:
