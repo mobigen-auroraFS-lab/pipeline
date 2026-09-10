@@ -304,6 +304,24 @@ class TestThinWrappers(unittest.TestCase):
             with mock.patch.dict(os.environ, {"WATCHER_INBOX_DIR": d}):
                 self.assertTrue(gate())                                  # 파일 존재 → True
 
+    def test_gate_inbox_nonempty_sees_files_in_subfolders(self) -> None:
+        # 2026-09-10 결함: 최상위만 봐서(os.scandir 비재귀) `actor/…`·`국보/…` 처럼 폴더로 정리된 인입을 "비었다"고
+        # 판정 → 수집이 영원히 건너뛰어졌다. 게이트는 수집기(collect_files · 재귀)와 같은 범위를 봐야 한다.
+        import os
+        import tempfile
+        from unittest import mock
+
+        gate = _callable("dag_collect", "gate_inbox_nonempty")
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "actor", "deep"))
+            with mock.patch.dict(os.environ, {"WATCHER_INBOX_DIR": d}):
+                self.assertFalse(gate(), "폴더만 있고 파일이 없으면 거짓")
+                with open(os.path.join(d, "actor", "deep", "x.mp4"), "wb") as f:
+                    f.write(b"x")
+                self.assertTrue(gate(), "하위 폴더의 파일도 '있음'으로 본다")
+            with mock.patch.dict(os.environ, {"WATCHER_INBOX_DIR": os.path.join(d, "nope")}):
+                self.assertFalse(gate(), "인입 디렉터리가 없으면 거짓(오류 아님)")
+
     def test_process_callable_calls_process_received_batch(self) -> None:
         from processing.ingest.batch_runner import BatchReport
 

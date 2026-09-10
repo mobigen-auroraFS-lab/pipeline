@@ -132,7 +132,8 @@ def _inbox_nonempty(**_context) -> bool:
     보고 없으면 아래 단계를 건너뛴다.
 
     Returns:
-        파일이 있으면 참. 인입 디렉터리 자체가 없으면 거짓(오류가 아니다 — 아직 안 만든 상태).
+        파일이 하나라도 있으면 참(**하위 폴더 포함** — 수집기 ``collect_files`` 와 같은 범위). 인입 디렉터리
+        자체가 없으면 거짓(오류가 아니다 — 아직 안 만든 상태).
 
     Raises:
         RuntimeError: 인입 경로 환경변수가 없을 때.
@@ -140,11 +141,15 @@ def _inbox_nonempty(**_context) -> bool:
     inbox = os.environ.get("WATCHER_INBOX_DIR")
     if not inbox:
         raise RuntimeError("WATCHER_INBOX_DIR 환경변수(인입 디렉터리)가 필요합니다.")
-    try:
-        with os.scandir(inbox) as it:
-            return any(entry.is_file() for entry in it)
-    except FileNotFoundError:
+    if not os.path.isdir(inbox):
         return False
+    # 🔴 하위 폴더까지 본다(2026-09-10 수정). 예전엔 최상위만 봐서(os.scandir 비재귀) 인입이 ``actor/…``·``국보/…``
+    # 처럼 폴더로 정리돼 있으면 "비었다"고 판정해 수집을 **영원히 건너뛰었다** — 뒤의 ``collect_files`` 는 재귀라
+    # 게이트와 수집기의 눈높이가 달랐던 것이다. 첫 파일을 보는 즉시 멈추므로 큰 인입에서도 비용이 작다.
+    for _dir, _subdirs, files in os.walk(inbox):
+        if files:
+            return True
+    return False
 
 
 def _has_new_received(**context) -> bool:
