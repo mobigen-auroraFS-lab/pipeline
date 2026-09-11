@@ -51,6 +51,7 @@ from typing import Any
 
 from psycopg.rows import dict_row
 
+from src.config.filename_util import meaningful_file_name
 from src.mm_meta import (
     DESC_PROMPT_VERSION,
     ENTITY_TYPE_DEFS,
@@ -120,6 +121,7 @@ _MAX_DESC_SAMPLES = 10
 #      나란히 두는 것으로는 못 막는다 — 손 SQL·구버전이 남긴 행 하나가 배치 전체를 죽인다.
 _TARGET_BASE_SQL = """
 SELECT a.asset_id,
+       a.fs_path,
        m.ext_meta->>'summary' AS summary,
        m.ext_meta->'keywords' AS keywords
 FROM asset a
@@ -354,6 +356,9 @@ def run_binding(
         try:
             judgement = judge(
                 summary, keywords, client=client, summary_max_chars=summary_max_chars,
+                # 파일 이름은 **참고**로만 간다 — 주제는 키워드가 정하고 이름은 그 키워드가 누구를
+                # 가리키는지 좁힌다(2026-09-11). 뜻 없는 이름은 이미 None 이라 문안이 안 바뀐다.
+                name_hint=item.get("name_hint"),
                 # 정의문을 실은 문안으로 판정한다 — 스탬프(report["prompt_version"])는 **같은 값**
                 # 에서 나왔다(prompt_version_for). 둘을 따로 정하면 문안과 판이 갈린다.
                 type_defs=type_defs,
@@ -555,8 +560,10 @@ def fetch_binding_targets(
             판**을 찾으면 그 자산의 이력은 영원히 조건을 만족하지 못한다.
 
     Returns:
-        ``[{asset_id(str), summary(str), keywords(list[str])}]`` — asset_id 오름차순. 요약·키워드는
-        문자열로 눌러 담는다(``None`` 이 프롬프트에 "None" 으로 새지 않게).
+        ``[{asset_id(str), summary(str), keywords(list[str]), name_hint(str|None)}]`` — asset_id
+        오름차순. 요약·키워드는 문자열로 눌러 담는다(``None`` 이 프롬프트에 "None" 으로 새지 않게).
+        ``name_hint`` 는 **뜻 있는 파일 이름**이고, 뜻이 없으면(출처 일련번호·``IMG_0001`` 등)
+        ``None`` 이라 프롬프트에 그 줄 자체가 붙지 않는다.
     """
     sql = _TARGET_BASE_SQL
     params: list[Any] = []
@@ -579,6 +586,9 @@ def fetch_binding_targets(
             "asset_id": str(r["asset_id"]),
             "summary": str(r["summary"] or ""),
             "keywords": [str(k) for k in (r["keywords"] or []) if k is not None],
+            # 뜻 있는 파일 이름만 담는다(뜻이 없으면 None) — 판정 프롬프트의 참고 줄 재료다.
+            # 게이트가 코어 순수 함수라 여기서 다시 판단하지 않는다.
+            "name_hint": meaningful_file_name(r.get("fs_path")),
         }
         for r in rows
     ]

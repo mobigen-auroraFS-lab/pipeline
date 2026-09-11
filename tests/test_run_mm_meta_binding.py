@@ -557,7 +557,9 @@ class TestFetchTargets(unittest.TestCase):
         self.assertIn(RULE_VERSION, params)
         self.assertIn(10, params)
         # 조회행 id → str · None 요약·키워드 정규화(프롬프트로 "None" 이 새지 않게).
-        self.assertEqual(rows, [{"asset_id": _A1, "summary": "", "keywords": ["가"]}])
+        # name_hint 는 파일 경로에서 뽑는다 — 이 가짜 행에는 경로가 없으니 None 이 맞다.
+        self.assertEqual(rows, [{"asset_id": _A1, "summary": "", "keywords": ["가"],
+                                 "name_hint": None}])
 
     def test_rejudge_drops_the_history_filter(self) -> None:
         # 후보 승인(수동 등록) 뒤 재소속 경로 — 이력이 있어도 다시 판정한다.
@@ -1002,3 +1004,36 @@ class TestMainExitCode(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NameHintPassThroughTest(unittest.TestCase):
+    """파일 이름 참고가 판정부까지 흘러가는가(2026-09-11 · 배선만 본다 · 문안은 코어가 봉인).
+
+    🔴 재는 것 둘: ① 뜻 있는 이름은 그대로 간다 ② **뜻이 없어 걸러진 자산은 ``None`` 으로 간다**
+    (사용자 요구 — 의미 없는 파일명이 판정을 흔들지 않을 것). ②가 깨지면 프롬프트에 빈 이름 줄이
+    붙어 뜻 없는 자산의 문안까지 달라진다.
+    """
+
+    def _seen_hint(self, material: dict) -> object:
+        seen: dict[str, object] = {}
+
+        def _judge(summary, keywords, **kwargs):
+            seen["hint"] = kwargs.get("name_hint", "<미전달>")
+            return _ok()
+
+        rb.run_binding([material], mode=rb.DISCOVERY_PROPOSE, judge_fn=_judge, dry_run=True)
+        return seen.get("hint", "<호출 안 됨>")
+
+    def test_뜻_있는_이름은_판정부로_간다(self) -> None:
+        m = dict(_material(_A1))
+        m["name_hint"] = "배우 윤석화 인터뷰"
+        self.assertEqual(self._seen_hint(m), "배우 윤석화 인터뷰")
+
+    def test_뜻_없어_걸러진_자산은_None_으로_간다(self) -> None:
+        m = dict(_material(_A1))
+        m["name_hint"] = None
+        self.assertIsNone(self._seen_hint(m))
+
+    def test_재료에_이름_키가_없어도_터지지_않는다(self) -> None:
+        # 옛 재료 모양(키 없음)으로도 배치가 돌아야 한다 — 부분 배포·되돌리기 안전판.
+        self.assertIsNone(self._seen_hint(dict(_material(_A1))))
