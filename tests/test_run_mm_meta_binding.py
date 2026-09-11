@@ -559,7 +559,7 @@ class TestFetchTargets(unittest.TestCase):
         # 조회행 id → str · None 요약·키워드 정규화(프롬프트로 "None" 이 새지 않게).
         # name_hint 는 파일 경로에서 뽑는다 — 이 가짜 행에는 경로가 없으니 None 이 맞다.
         self.assertEqual(rows, [{"asset_id": _A1, "summary": "", "keywords": ["가"],
-                                 "name_hint": None}])
+                                 "name_hint": None, "name_candidates": ()}])
 
     def test_rejudge_drops_the_history_filter(self) -> None:
         # 후보 승인(수동 등록) 뒤 재소속 경로 — 이력이 있어도 다시 판정한다.
