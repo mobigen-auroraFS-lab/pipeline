@@ -131,6 +131,36 @@ def embed_entities(**_context) -> dict[str, int]:
     return summary
 
 
+def label_entities(**_context) -> dict[str, int]:
+    """묶음이 갱신된 뒤 **개체 갈래(라벨)** 를 같은 실행 안에서 따라 붙인다(2026-09-11 · 087 T015 자동화).
+
+    왜 붙이나: 갈래 배치가 CLI 전용이라, DB 를 비우고 새로 적재한 뒤 아무도 돌리지 않아 개체 화면의
+    「갈래」 필터가 통째로 사라졌다(칩이 0개면 섹션이 숨는다 — 실측: 개체 1,109 · 라벨 행 0).
+    개체 색인이 같은 이유로 비어 있던 문제(090)와 같은 꼴이라 같은 방식으로 고친다.
+    CLI ``run_entity_label`` 과 **같은 함수**(``run_label_pass``)를 부른다 — 배선을 복제하지 않는다.
+
+    ⚠️ ``embed_entities`` 와 **나란히** 둔다(순서 의존 없음): 개체 임베딩 재료는 이름·타입·설명문·
+    키워드로만 만들고 갈래를 싣지 않으므로, 갈래가 먼저든 나중이든 임베딩 결과가 달라지지 않는다.
+
+    Returns:
+        개수만 담은 요약(``targets``·``judged``·``failed``·``rows``) — 태스크 간 전달 값은 작게.
+    """
+    from processing.app.run_entity_label import run_label_pass
+    from src.config.settings import init_settings
+    from src.database.postgres_util import PostgresUtil
+
+    init_settings(os.environ.get("META_ENV", _DEFAULT_ENV))
+    db = PostgresUtil()
+    with db:
+        report = run_label_pass(db, limit=_int_env("DAG_ENTITY_LABEL_LIMIT", 500))
+    summary = {"targets": int(report.get("targets", 0)), "judged": int(report.get("judged", 0)),
+               "failed": int(report.get("failed", 0)), "rows": int(report.get("rows", 0))}
+    if summary["failed"]:
+        _LOG.warning("개체 갈래 판정 실패 %d건(다음 실행이 다시 집는다)", summary["failed"])
+    _LOG.info("label_entities 완료: %s", summary)
+    return summary
+
+
 def _has_more_mm_meta(**context) -> bool:
     """이번에 판정한 것이 있으면 참 — 자기 자신을 다시 깨워 남은 것을 이어서 소화한다.
 
@@ -160,5 +190,7 @@ with DAG(
     trigger_more = TriggerDagRunOperator(task_id="trigger_more", trigger_dag_id="dag_mm_meta")
     # 묶음 뒤 개체 임베딩·색인(가지) — 드레인 게이트와 나란히 돌아 드레인을 막지 않는다.
     embed = PythonOperator(task_id="embed_entities", python_callable=embed_entities)
+    label = PythonOperator(task_id="label_entities", python_callable=label_entities)
     bind >> gate_more >> trigger_more
     bind >> embed
+    bind >> label

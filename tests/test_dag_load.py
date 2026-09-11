@@ -143,7 +143,8 @@ class TestDagBagIntegrity(unittest.TestCase):
                             "gate_more_received", "trigger_more"},
             "dag_relations": {_RELATIONS_TASK, "gate_more_unresolved", "trigger_more"},
             # 084/085: 판정 → 진전 게이트 → 자기 재트리거(연속 드레인 · 관계 DAG 동형).
-            "dag_mm_meta": {_MM_META_TASK, "gate_more_mm_meta", "trigger_more", "embed_entities"},
+            "dag_mm_meta": {_MM_META_TASK, "gate_more_mm_meta", "trigger_more", "embed_entities",
+                            "label_entities"},
             "dag_mm_classify": {_MM_CLASSIFY_TASK, "gate_more_mm_classify", "trigger_more"},
         }
         for dag_id, tasks in expected_tasks.items():
@@ -433,6 +434,28 @@ class TestThinWrappers(unittest.TestCase):
         m_pass.assert_called_once()
         self.assertIs(m_pass.call_args.args[0], db)
         self.assertEqual(summary, {"targets": 7, "created": 2, "indexed": 7, "index_purged": 82})
+
+    def test_mm_meta_label_task_follows_bind_and_delegates(self) -> None:
+        # 2026-09-11 — 개체 갈래(087 T015)도 CLI 전용이라 DB 를 비우고 새로 적재하면 아무도 돌리지
+        # 않았고, 화면의 「갈래」 필터가 통째로 사라졌다(칩 0개면 섹션이 숨는다 · 실측 라벨 행 0).
+        # 개체 색인과 같은 조치 — 묶음 뒤에 붙이되 드레인 게이트·임베딩과 **나란히** 돈다
+        # (개체 임베딩 재료에 갈래가 안 실리므로 순서 의존이 없다). 배선은 복사하지 않는다.
+        dag = _dagbag().dags["dag_mm_meta"]
+        self.assertIn("label_entities", dag.get_task(_MM_META_TASK).downstream_task_ids)
+        self.assertNotIn("label_entities", dag.get_task("gate_more_mm_meta").downstream_task_ids)
+        self.assertNotIn("label_entities", dag.get_task("embed_entities").downstream_task_ids)
+        cb = _callable("dag_mm_meta", "label_entities")
+        db, _c, _cur = _fake_db()
+        with mock.patch.dict(os.environ, {"META_ENV": "dev", "DAG_ENTITY_LABEL_LIMIT": "40"}), \
+                mock.patch("src.config.settings.init_settings", return_value=object()), \
+                mock.patch("src.database.postgres_util.PostgresUtil", return_value=db), \
+                mock.patch("processing.app.run_entity_label.run_label_pass",
+                           return_value={"targets": 9, "judged": 9, "failed": 0, "rows": 18}) as m_pass:
+            summary = cb()
+        m_pass.assert_called_once()
+        self.assertIs(m_pass.call_args.args[0], db)
+        self.assertEqual(m_pass.call_args.kwargs["limit"], 40)   # 상한이 환경변수로 흘러든다
+        self.assertEqual(summary, {"targets": 9, "judged": 9, "failed": 0, "rows": 18})
 
     def test_mm_classify_callable_delegates_to_run_batch(self) -> None:
         # 085 T110 — 같은 규율(DAG 에 비즈니스 로직 0).
