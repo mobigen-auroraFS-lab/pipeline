@@ -66,6 +66,11 @@ class TestCollectFile(unittest.TestCase):
             "find_registered_asset_by_hash": stack.enter_context(
                 mock.patch.object(ps, "find_registered_asset_by_hash", return_value=dup)
             ),
+            # 처리 단계 내용 중복 조회 — 중복 아님이 기본(이 테스트들의 관심사가 아니다).
+            "find_duplicate_terminal_asset": stack.enter_context(
+                mock.patch.object(ps, "find_duplicate_terminal_asset", return_value=None)
+            ),
+            "clear_file_hash": stack.enter_context(mock.patch.object(ps, "clear_file_hash")),
             "create_asset": stack.enter_context(mock.patch.object(ps, "create_asset", return_value=_AID)),
             "record_lineage": stack.enter_context(mock.patch.object(ps, "record_lineage")),
         }
@@ -131,6 +136,10 @@ class TestProcessAsset(unittest.TestCase):
         # FR-E3: process_asset 는 pipeline_steps(ps) 내부 seam(set_status·finalize_asset 등)을 호출 → ps 에서 patch.
         return {
             "set_status": stack.enter_context(mock.patch.object(ps, "set_status")),
+            # 처리 단계 내용 중복 조회 — 중복 아님이 기본(이 테스트들의 관심사가 아니다).
+            "find_duplicate_terminal_asset": stack.enter_context(
+                mock.patch.object(ps, "find_duplicate_terminal_asset", return_value=None)
+            ),
             "record_classification": stack.enter_context(mock.patch.object(ps, "record_classification")),
             "validate_ext_meta": stack.enter_context(mock.patch.object(ps, "validate_ext_meta")),
             "finalize_asset": stack.enter_context(mock.patch.object(ps, "finalize_asset")),
@@ -211,6 +220,12 @@ class TestRunIngestSplitSeal(unittest.TestCase):
                 side_effect=lambda c, h: (seq.append("dedup"), dup)[1],
             )
         )
+        stack.enter_context(
+            # 처리 단계 내용 중복 조회 — 순서 봉인의 관심사가 아니라 중복 아님으로 고정한다
+            # (여기서 MagicMock 이 새면 모든 자산이 분류 전에 보류돼 순서가 통째로 달라진다).
+            mock.patch.object(ps, "find_duplicate_terminal_asset", return_value=None)
+        )
+        stack.enter_context(mock.patch.object(ps, "clear_file_hash"))
         stack.enter_context(
             mock.patch.object(ps, "create_asset", side_effect=lambda c, **k: (seq.append("create_asset"), _AID)[1])
         )

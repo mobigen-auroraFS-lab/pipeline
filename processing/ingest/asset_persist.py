@@ -52,6 +52,59 @@ def find_registered_asset_by_hash(conn: Connection[Any], file_hash: str) -> uuid
     return row["asset_id"] if row else None
 
 
+def find_duplicate_terminal_asset(conn: Connection[Any], asset_id: uuid.UUID) -> uuid.UUID | None:
+    """이 자산과 내용이 같으면서 **이미 끝난** 다른 자산의 id. 없으면 ``None``.
+
+    Args:
+        conn: DB 커넥션(읽기 전용 — 이 함수는 쓰지 않는다).
+        asset_id: 기준 자산. 이 자산의 ``file_hash`` 로 찾고 자기 자신은 제외한다.
+
+    Returns:
+        내용이 같은 종료 자산 하나의 id. 해시가 없거나 그런 자산이 없으면 ``None``.
+        여럿이면 먼저 만들어진 것을 준다(같은 입력에 같은 답 — 사유 문자열이 흔들리지 않게).
+
+    설계 배경: `docs/설계_변경이력.md` 2026-09-11 (2)
+    """
+    # `find_registered_asset_by_hash` 와 무엇이 다른가: 저쪽은 **파일을 집어 들 때**(경로만 아는
+    #   시점) 해시로 묻고, 이쪽은 이미 만들어진 자산 행을 기준으로 자기 자신을 빼고 묻는다.
+    # 왜 또 묻나(2026-09-10 실측): 수집 시점 검사는 종료 상태(registered·deferred)만 본다. 같은
+    #   배치로 함께 들어온 사본은 그때 둘 다 `received` 라 서로를 보지 못한다. 국보 사진 6건이 그
+    #   창으로 빠져나가 추출까지 마친 뒤 등록에서 유일 색인에 걸렸고, 파이프는 그것을 추출 실패로
+    #   보아 3번 재시도한 끝에 `failed` 로 굳혔다. 처리 시점에는 먼저 들어온 사본이 이미 끝나 있다.
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT other.asset_id FROM asset me "
+            "JOIN asset other ON other.file_hash = me.file_hash "
+            "WHERE me.asset_id = %s AND me.file_hash IS NOT NULL "
+            "  AND other.asset_id <> me.asset_id "
+            "  AND other.status IN ('registered', 'deferred') "
+            "ORDER BY other.created_at, other.asset_id LIMIT 1",
+            (asset_id,),
+        )
+        row = cur.fetchone()
+    return row["asset_id"] if row else None
+
+
+def clear_file_hash(conn: Connection[Any], asset_id: uuid.UUID) -> None:
+    """이 자산의 ``file_hash`` 를 비운다(DB 쓰기) — 중복 보류 직전에만 쓴다.
+
+    Args:
+        conn: DB 커넥션(호출자 트랜잭션 안에서 돈다).
+        asset_id: 해시를 비울 자산. 🔴 ``set_status(DEFERRED)`` **보다 먼저** 같은 트랜잭션에서
+            부른다 — 뒤집으면 유일 색인이 먼저 터진다(지연 검사가 아니다).
+
+    설계 배경: `docs/설계_변경이력.md` 2026-09-11 (2)
+    """
+    # 왜 비우나(2026-09-11 실측): 유일 색인 `uq_asset_file_hash_dedup` 의 조건이
+    #   `status IN ('registered','deferred') AND file_hash IS NOT NULL` 이다. 내용이 같은 자산을
+    #   해시를 둔 채 `deferred` 로 바꾸면 그 전이 자체가 색인 위반으로 터진다(롤백 시험으로 확인).
+    # 잃는 것과 남는 것: 해시는 잃지만 무엇의 중복인지는 남는다 — 사유 문자열
+    #   `duplicate_content:<원본 asset_id>` 와 계보 `ingest.deferred.v1` 의 `duplicate_of` 에 적힌다.
+    #   해시는 파일에서 다시 구할 수 있고, 내용의 대표는 살아남은 원본 자산이 갖는다.
+    with conn.cursor() as cur:
+        cur.execute("UPDATE asset SET file_hash = NULL WHERE asset_id = %s", (asset_id,))
+
+
 def create_asset(
     conn: Connection[Any],
     *,
