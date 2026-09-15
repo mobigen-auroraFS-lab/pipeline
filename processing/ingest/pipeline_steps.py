@@ -23,8 +23,10 @@ from processing.classify.asset_topic import build_self_text, classify_asset_topi
 from processing.classify.types import ClassificationResult
 from processing.dispatch.types import AssetRecord, ExtractContext
 from processing.ingest.asset_persist import (
+    clear_file_hash,
     create_asset,
     finalize_asset,
+    find_duplicate_terminal_asset,
     find_registered_asset_by_hash,
 )
 from processing.ingest.classification_persist import record_classification
@@ -42,6 +44,8 @@ from src.file.hashing import file_hash_and_size
 from src.registry.ext_meta_field_registry import validate_ext_meta
 
 REASON_DUPLICATE = "duplicate"
+# 처리 단계에서 잡은 내용 중복(수집 시점 검사가 못 본 "같은 배치 동시 유입") — 사유에 원본 자산 id 를 붙여 남긴다.
+REASON_DUPLICATE_CONTENT = "duplicate_content"
 
 # CLI(run_ingest)의 _configure_logging 이 설정하는 것과 **같은 로거**("meta_extract.run_ingest")를 쓴다
 # — getLogger 는 같은 이름에 같은 객체를 돌려주므로, 스텝을 이 모듈로 옮겨도 로그 대상·핸들러가 불변이다.
@@ -226,6 +230,30 @@ def process_asset(
         record_lineage(conn, asset_id, activity=LineageActivity.INGEST_ROUTING, agent="run_ingest")
         set_status(conn, asset_id, AssetStatus.CLASSIFYING)
         record_lineage(conn, asset_id, activity=LineageActivity.INGEST_CLASSIFYING, agent="run_ingest")
+
+    # 1-1) 내용 중복 보류 — **분류·추출 전에** 끊는다.
+    #   수집 시점 검사(``collect_file``)는 종료 상태만 보므로 같은 배치로 함께 들어온 사본은 서로를
+    #   보지 못한다(2026-09-10 실측: 국보 사진 6건). 처리 시점에는 먼저 들어온 사본이 이미 끝나
+    #   있으니 여기서 잡힌다.
+    #   ⚠️ ``failed`` 가 아니라 ``deferred`` 인 이유: 같은 파일이 두 번 오는 것은 **정상**이다
+    #      (기관 API 가 같은 사진을 다른 번호로 준다). 실패로 세면 실패 지표가 부풀고 고착 재스캔이
+    #      헛돌며, 무엇보다 추출을 3번 반복한 뒤에야 유일 색인이 그것을 막는다.
+    #   ⚠️ 자리가 여기인 이유: ``deferred`` 로 갈 수 있는 상태는 ``classifying`` 뿐이고(전이표),
+    #      분류·추출 비용을 쓰기 전 가장 이른 지점이 방금 ``classifying`` 을 찍은 직후다.
+    with db.transaction() as conn:
+        duplicate_of = find_duplicate_terminal_asset(conn, asset_id)
+        if duplicate_of is not None:
+            # 🔴 해시를 **먼저** 비운다 — 유일 색인 조건이 `status IN (registered,deferred) AND
+            #    file_hash IS NOT NULL` 이라, 해시를 둔 채 보류로 바꾸면 그 전이가 색인 위반으로
+            #    터진다(2026-09-11 롤백 시험으로 확인). 순서를 뒤집으면 고친 것이 무효가 된다.
+            clear_file_hash(conn, asset_id)
+            set_status(conn, asset_id, AssetStatus.DEFERRED,
+                       reason=f"{REASON_DUPLICATE_CONTENT}:{duplicate_of}")
+            record_lineage(conn, asset_id, activity=LineageActivity.INGEST_DEFERRED,
+                           agent="run_ingest", payload={"duplicate_of": str(duplicate_of)})
+    if duplicate_of is not None:
+        _LOG.info("deferred(duplicate of %s): asset_id=%s %s", duplicate_of, asset_id, fs_path)
+        return "deferred"
 
     # 2) 도메인 분류: override 우선, 없으면 레지스트리 기본 분류기(ctx 기반)
     ctx = ExtractContext(file_path=fs_path, modality=modality, domain=domain, settings=settings, db=db)

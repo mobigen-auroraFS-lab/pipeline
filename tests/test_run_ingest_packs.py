@@ -40,6 +40,9 @@ class TestRunIngestPackPath(unittest.TestCase):
         stack.enter_context(mock.patch.object(ps, "route_file", return_value=_route()))
         stack.enter_context(mock.patch.object(ps, "file_hash_and_size", return_value=("h", 1)))
         stack.enter_context(mock.patch.object(ps, "find_registered_asset_by_hash", return_value=None))
+        # 처리 단계 내용 중복 조회 — 중복 아님이 기본(이 테스트의 관심사가 아니다).
+        stack.enter_context(mock.patch.object(ps, "find_duplicate_terminal_asset", return_value=None))
+        stack.enter_context(mock.patch.object(ps, "clear_file_hash"))
         stack.enter_context(mock.patch.object(ps, "create_asset", return_value=uuid.UUID(int=1)))
         stack.enter_context(mock.patch.object(ps, "record_classification"))
         stack.enter_context(mock.patch.object(ps, "set_status"))

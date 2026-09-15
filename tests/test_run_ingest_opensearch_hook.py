@@ -164,6 +164,11 @@ def _patch_ingest(stack: contextlib.ExitStack) -> dict:
         "find_registered_asset_by_hash": mock.patch.object(
             ps, "find_registered_asset_by_hash", return_value=None
         ),
+        # 처리 단계 내용 중복 조회 — 중복 아님이 기본(이 테스트의 관심사가 아니다).
+        "find_duplicate_terminal_asset": mock.patch.object(
+            ps, "find_duplicate_terminal_asset", return_value=None
+        ),
+        "clear_file_hash": mock.patch.object(ps, "clear_file_hash"),
         "create_asset": mock.patch.object(ps, "create_asset", return_value=1),
         "record_classification": mock.patch.object(ps, "record_classification"),
         "set_status": mock.patch.object(ps, "set_status"),

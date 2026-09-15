@@ -29,7 +29,7 @@ def _cls(label="general", stage=2, conf=0.7):
     return ClassificationResult(final_label=label, confidence=conf, decided_stage=stage)
 
 
-def _patch_all(stack: contextlib.ExitStack, route_result, *, dup=None) -> dict:
+def _patch_all(stack: contextlib.ExitStack, route_result, *, dup=None, dup_content=None) -> dict:
     """수집·처리 스텝 의존 함수 전부 patch 후 mock dict 반환.
 
     069 FR-E3: collect_file/process_asset 가 pipeline_steps(ps) 로 이관돼 내부 seam(route_file·set_status
@@ -43,6 +43,10 @@ def _patch_all(stack: contextlib.ExitStack, route_result, *, dup=None) -> dict:
         "file_hash_and_size": mock.patch.object(ps, "file_hash_and_size", return_value=("h0", 10)),
         "find_registered_asset_by_hash":
             mock.patch.object(ps, "find_registered_asset_by_hash", return_value=dup),
+        # 처리 단계 내용 중복 조회 — 기본 None(중복 아님)이라 기존 테스트 흐름은 그대로다.
+        "find_duplicate_terminal_asset":
+            mock.patch.object(ps, "find_duplicate_terminal_asset", return_value=dup_content),
+        "clear_file_hash": mock.patch.object(ps, "clear_file_hash"),
         "create_asset": mock.patch.object(ps, "create_asset", return_value=1),
         "record_classification": mock.patch.object(ps, "record_classification"),
         "set_status": mock.patch.object(ps, "set_status"),
@@ -65,9 +69,10 @@ class TestRunIngest(unittest.TestCase):
         self.settings = mock.MagicMock(opensearch=mock.MagicMock(sync_enabled=False))
         self.db = mock.MagicMock()
 
-    def _ingest(self, files, m_route, *, extract_fn, classify=None, dup=None, configure=None):
+    def _ingest(self, files, m_route, *, extract_fn, classify=None, dup=None, dup_content=None,
+                configure=None):
         with contextlib.ExitStack() as stack:
-            m = _patch_all(stack, m_route, dup=dup)
+            m = _patch_all(stack, m_route, dup=dup, dup_content=dup_content)
             if configure:
                 configure(m)
             res = ri.run_ingest(
@@ -126,6 +131,53 @@ class TestRunIngest(unittest.TestCase):
         self.assertTrue(res["skipped"][0][1].startswith(ri.REASON_DUPLICATE))
         m["create_asset"].assert_not_called()
         m["record_classification"].assert_not_called()
+
+    def test_내용이_같은_자산이_이미_끝나_있으면_분류_전에_보류된다(self) -> None:
+        # 🔴 2026-09-10 실측 재발 방지: 같은 배치로 함께 들어온 사본은 수집 시점 검사(종료 상태만
+        #    본다)를 통과해 버린다. 그러면 추출까지 마친 뒤 등록에서 유일 색인에 걸리고, 파이프가
+        #    그것을 추출 실패로 보아 3번 재시도한 끝에 failed 로 굳었다(국보 사진 6건).
+        #    처리 단계에서 다시 물어 **분류·추출 전에** deferred 로 끊는다.
+        called = {"extract": False}
+
+        def _extract(_ctx):
+            called["extract"] = True
+            return AssetRecord()
+
+        res, m = self._ingest(["/d/a.jpg"], _route(modality="jpg"),
+                              extract_fn=_extract, dup_content=_EXISTING)
+        self.assertEqual(res["deferred"], [1])
+        self.assertEqual(res["registered"], [])
+        self.assertFalse(called["extract"])            # 추출 비용을 쓰지 않는다
+        m["record_classification"].assert_not_called()  # 분류 비용도 쓰지 않는다
+        m["mark_failed"].assert_not_called()            # 중복은 실패가 아니다
+
+    def test_내용_중복_보류_사유에_원본_자산_id_가_남는다(self) -> None:
+        # 사유 문자열이 곧 조사 단서다 — "무엇의 중복인가"를 알 수 없으면 지울지 되살릴지 못 정한다.
+        res, m = self._ingest(["/d/a.jpg"], _route(modality="jpg"),
+                              extract_fn=lambda ctx: AssetRecord(), dup_content=_EXISTING)
+        self.assertEqual(res["deferred"], [1])
+        reasons = [c.kwargs.get("reason") for c in m["set_status"].call_args_list
+                   if c.kwargs.get("reason")]
+        self.assertTrue(any(r == f"{ps.REASON_DUPLICATE_CONTENT}:{_EXISTING}" for r in reasons),
+                        f"사유에 원본 id 가 없다: {reasons}")
+
+    def test_중복_보류는_해시를_먼저_비운다(self) -> None:
+        # 🔴 유일 색인 조건이 `status IN (registered,deferred) AND file_hash IS NOT NULL` 이라
+        #    해시를 둔 채 보류로 바꾸면 **그 전이가 색인 위반으로 터진다**(2026-09-11 롤백 시험).
+        #    순서가 규약이므로 호출 순서까지 봉인한다.
+        order: list[str] = []
+        res, m = self._ingest(["/d/a.jpg"], _route(modality="jpg"),
+                              extract_fn=lambda ctx: AssetRecord(), dup_content=_EXISTING,
+                              configure=lambda mm: (
+                                  mm["clear_file_hash"].configure_mock(
+                                      side_effect=lambda *a, **k: order.append("clear_file_hash")),
+                                  mm["set_status"].configure_mock(
+                                      side_effect=lambda *a, **k: order.append("set_status")),
+                              ))
+        self.assertEqual(res["deferred"], [1])
+        self.assertIn("clear_file_hash", order)
+        self.assertLess(order.index("clear_file_hash"), len(order) - 1)
+        self.assertEqual(order[order.index("clear_file_hash") + 1], "set_status")
 
     def test_medical_standard_format_deferred(self) -> None:
         # DICOM 등 stage1 시그니처 → 추출 보류(deferred), 실패 아님, 추출 미호출.
