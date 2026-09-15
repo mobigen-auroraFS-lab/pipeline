@@ -215,49 +215,33 @@ def format_report(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    """명령행 파서.
+def run_label_pass(
+    db: Any,
+    *,
+    min_members: int = DEFAULT_MIN_MEMBERS,
+    limit: int | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """개체 라벨 한 판 — 스킬·대상을 읽고 판정해 저장한다(**CLI·DAG 공용** · 2026-09-11).
 
-    Returns:
-        파서.
-    """
-    p = argparse.ArgumentParser(description="개체 라벨 배치 (묶음에 분류 스킬 갈래를 붙인다)")
-    p.add_argument("--env", choices=("dev", "prod"), default="dev")
-    p.add_argument("--dry-run", action="store_true", help="쓰기 0 — 무엇이 붙을지만 보고(판정은 한다)")
-    p.add_argument(
-        "--min-members",
-        type=int,
-        default=DEFAULT_MIN_MEMBERS,
-        help=f"대상 최소 구성 자산 수(기본 {DEFAULT_MIN_MEMBERS} — 화면 노출 임계와 같아야 한다)",
-    )
-    p.add_argument("--limit", type=int, default=None, help="이번 실행에서 처리할 개체 수 상한")
-    return p
+    왜 함수로 떼었나: 이 배치가 CLI 전용이라 DB 를 비우고 새로 적재하면 아무도 돌리지 않았고,
+    화면의 「갈래」 필터가 통째로 사라졌다 — 칩이 0개면 섹션이 숨는다(2026-09-11 실측: 개체
+    1,109 · 라벨 행 0). 개체 색인이 같은 이유로 비어 있던 문제(090)를 DAG 태스크로 고친 것과
+    같은 조치다. 🔴 **배선을 복제하지 않는다** — CLI 도 DAG 도 이 함수 하나를 부른다.
 
-
-def main(argv: list[str] | None = None) -> int:
-    """대상을 읽어 판정·저장하고 리포트를 출력한다.
+    무엇을 하나: 활성 스킬과 노출 임계를 넘은 개체를 읽고(읽기 트랜잭션 1회), 개체마다 구성 자산
+    요약으로 판정 재료를 만들어 판정한 뒤, 개체 하나 × 스킬 하나 단위로 라벨 행을 교체한다.
 
     Args:
-        argv: 명령행 인자. ``None`` 이면 실제 명령행.
+        db: 열려 있는 ``PostgresUtil``(호출부가 연다·닫는다).
+        min_members: 대상 최소 구성 자산 수. **화면 노출 임계와 같아야 한다** — 다르면 화면에는
+            보이는데 갈래가 없는 개체(또는 그 반대)가 생긴다.
+        limit: 이번 판에서 처리할 개체 수 상한. ``None``(기본)이면 전량.
+        dry_run: 참이면 쓰지 않고 무엇이 붙을지만 집계한다(판정 LLM 호출은 한다).
 
     Returns:
-        종료 코드 — 실패가 하나라도 있으면 1(배치 모니터가 실패를 놓치지 않게).
+        ``run_entity_label`` 의 diff 리포트 dict.
     """
-    args = _build_parser().parse_args(argv)
-
-    from pathlib import Path
-
-    from dotenv import load_dotenv
-
-    from src.config.settings import init_settings
-    from src.database.postgres_util import PostgresUtil
-
-    env_path = Path(__file__).resolve().parents[2] / f".env.{args.env}"
-    if env_path.is_file():
-        load_dotenv(dotenv_path=env_path, override=False)
-    init_settings(args.env)
-
-    db = PostgresUtil()
 
     def _load(conn: Any) -> tuple[list[ClassificationSkill], list[dict[str, Any]]]:
         """스킬·대상을 **읽기 트랜잭션 한 번**에 읽는다.
@@ -271,9 +255,9 @@ def main(argv: list[str] | None = None) -> int:
         skills = [skill_from_row(dict(r)) for r in fetch_active_skills(conn)]
         targets = fetch_label_targets(
             conn,
-            min_members=args.min_members,
+            min_members=min_members,
             statuses=VISIBLE_STATUSES,
-            limit=args.limit,
+            limit=limit,
         )
         return skills, targets
 
@@ -335,13 +319,60 @@ def main(argv: list[str] | None = None) -> int:
             idempotent=False,
         )
 
-    report = run_entity_label(
+    return run_entity_label(
         skills,
         targets,
         material_fn=_material,
-        persist_fn=None if args.dry_run else _persist,
-        dry_run=args.dry_run,
+        persist_fn=None if dry_run else _persist,
+        dry_run=dry_run,
     )
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """명령행 파서.
+
+    Returns:
+        파서.
+    """
+    p = argparse.ArgumentParser(description="개체 라벨 배치 (묶음에 분류 스킬 갈래를 붙인다)")
+    p.add_argument("--env", choices=("dev", "prod"), default="dev")
+    p.add_argument("--dry-run", action="store_true", help="쓰기 0 — 무엇이 붙을지만 보고(판정은 한다)")
+    p.add_argument(
+        "--min-members",
+        type=int,
+        default=DEFAULT_MIN_MEMBERS,
+        help=f"대상 최소 구성 자산 수(기본 {DEFAULT_MIN_MEMBERS} — 화면 노출 임계와 같아야 한다)",
+    )
+    p.add_argument("--limit", type=int, default=None, help="이번 실행에서 처리할 개체 수 상한")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    """대상을 읽어 판정·저장하고 리포트를 출력한다.
+
+    Args:
+        argv: 명령행 인자. ``None`` 이면 실제 명령행.
+
+    Returns:
+        종료 코드 — 실패가 하나라도 있으면 1(배치 모니터가 실패를 놓치지 않게).
+    """
+    args = _build_parser().parse_args(argv)
+
+    from pathlib import Path
+
+    from dotenv import load_dotenv
+
+    from src.config.settings import init_settings
+    from src.database.postgres_util import PostgresUtil
+
+    env_path = Path(__file__).resolve().parents[2] / f".env.{args.env}"
+    if env_path.is_file():
+        load_dotenv(dotenv_path=env_path, override=False)
+    init_settings(args.env)
+
+    db = PostgresUtil()
+    report = run_label_pass(db, min_members=args.min_members, limit=args.limit,
+                            dry_run=args.dry_run)
     print(format_report(report))
     db.close()
     return 1 if report["failed"] else 0
