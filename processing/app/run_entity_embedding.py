@@ -176,6 +176,7 @@ def sync_entity_index(
     model_name: str,
     member_summaries: int = DEFAULT_MEMBER_SUMMARIES,
     member_keywords: int = DEFAULT_MEMBER_KEYWORDS,
+    recreate: bool = False,
 ) -> dict[str, Any]:
     """개체를 검색 엔진에 색인한다(092 · 임베딩 뒤에 이어서 돈다).
 
@@ -189,6 +190,9 @@ def sync_entity_index(
         conn: DB 커넥션(읽기).
         client: OpenSearch 클라이언트.
         index: 개체 인덱스 이름. 🔴 자산 인덱스와 달라야 한다(매핑 충돌 방지).
+        recreate: 참이면 색인을 지우고 다시 만든다(파괴적·옵트인). 분석기·매핑을 바꿨을 때의
+            반영 경로다 — 이미 색인된 문서는 옛 규칙으로 쪼개져 있어 덮어쓰기로는 바뀌지 않는다.
+            도는 동안 검색이 비어 보이므로 평소 배치는 거짓으로 둔다.
         targets: 색인할 개체들(``fetch_embedding_targets`` 결과).
         model_name: 이 모델로 만든 벡터만 색인한다(모델이 섞이면 유사도가 뜻을 잃는다).
         member_summaries: 문서에 실을 구성 자산 요약 수(개체당 조회 상한이기도 하다).
@@ -216,7 +220,7 @@ def sync_entity_index(
         ]
         docs.append(entity_to_doc(target, vector=vector, member_summaries=summaries,
                                   member_keywords=keywords.get(key, [])))
-    ensure_entity_index(client, index)
+    ensure_entity_index(client, index, recreate=recreate)
     indexed = bulk_index_entities(client, index, docs)
     return {"indexed": indexed, "skipped_no_vector": skipped,
             "elapsed_s": round(time.time() - started, 2)}
@@ -280,6 +284,10 @@ def _build_parser() -> argparse.ArgumentParser:
                         "🔴 자산 인덱스 이름을 주면 자산 검색이 깨진다")
     p.add_argument("--force", action="store_true",
                    help="재료가 같아도 다시 만든다(모델 교체·품질 재확인 시)")
+    p.add_argument("--recreate", action="store_true",
+                   help="🔴 개체 인덱스를 삭제 후 재생성(파괴적). 분석기·매핑을 바꿨을 때만 쓴다 — "
+                        "덮어쓰기로는 옛 규칙으로 쪼개진 문서가 남는다. 도는 동안 개체 검색이 "
+                        "비어 보인다. 자산 쪽 run_opensearch_resync --recreate 와 같은 통로다")
     p.add_argument("--min-members", type=int, default=MIN_BUNDLE_SIZE,
                    help=f"최소 구성 자산 수(기본 {MIN_BUNDLE_SIZE} = 화면 노출 임계)")
     p.add_argument("--limit", type=int, default=None, help="이번 실행에서 처리할 개체 수 상한")
@@ -323,6 +331,7 @@ def purge_orphan_index_docs(client: Any, index: str, conn: Any) -> int:
 def run_embedding_pass(db: Any, cfg: Any, *, min_members: int = MIN_BUNDLE_SIZE, limit: int | None = None,
                        force: bool = False, dry_run: bool = False, purge: bool = True,
                        index_name: str | None = search_constants.ENTITY_INDEX_DEFAULT,
+                       recreate_index: bool = False,
                        embed_fn: Callable[[str], list[float]] | None = None,
                        client: Any = None) -> dict[str, Any]:
     """개체 임베딩 한 바퀴 — 고아 정리 → 대상 읽기 → 임베딩 저장 → 검색 엔진 색인(+색인 고아 정리).
@@ -340,6 +349,8 @@ def run_embedding_pass(db: Any, cfg: Any, *, min_members: int = MIN_BUNDLE_SIZE,
         dry_run: 임베딩·쓰기·색인 0 — 대상만 본다.
         purge: 시작 시 PG 고아 정리(색인 고아 정리는 색인 단계에서 함께).
         index_name: 개체 인덱스. ``None`` 이면 색인을 건너뛴다.
+        recreate_index: 참이면 색인을 지우고 다시 만든 뒤 채운다(파괴적·옵트인). 분석기·매핑을
+            바꿨을 때만 쓴다 — 덮어쓰기로는 옛 규칙으로 쪼개진 문서가 그대로 남는다.
         embed_fn: 재료 → 벡터. ``None`` 이면 설정의 임베딩 API 를 쓴다(테스트가 갈아끼운다).
         client: OpenSearch 클라이언트. ``None`` 이면 설정으로 만든다(색인 단계에서만 필요).
 
@@ -416,7 +427,7 @@ def run_embedding_pass(db: Any, cfg: Any, *, min_members: int = MIN_BUNDLE_SIZE,
                 ``sync_entity_index`` 리포트 + ``index_purged``.
             """
             idx = sync_entity_index(conn, client=client, index=index_name, targets=targets,
-                                    model_name=model_name)
+                                    model_name=model_name, recreate=recreate_index)
             idx["index_purged"] = purge_orphan_index_docs(client, index_name, conn) if purge else 0
             return idx
 
@@ -452,6 +463,7 @@ def main(argv: list[str] | None = None) -> int:
         db, cfg, min_members=args.min_members, limit=args.limit, force=args.force, dry_run=args.dry_run,
         purge=not args.no_purge,
         index_name=None if args.no_index else (args.index or search_constants.ENTITY_INDEX_DEFAULT),
+        recreate_index=args.recreate,
     )
     print(f"대상 {report['targets']}개체 (구성 자산 {args.min_members}건 이상)"
           f"{' · dry-run' if args.dry_run else ''}{' · force' if args.force else ''}")
