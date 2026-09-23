@@ -18,10 +18,6 @@ from typing import Any
 from processing.app import run_opensearch_resync as mod
 
 
-class TestRunEnsurePipeline:
-    """자리표시 — 아래 TestCase 가 실제 검증이다."""
-
-
 class _Calls:
     def __init__(self, result: str = "created") -> None:
         self.calls: list[tuple[Any, str, tuple[float, float]]] = []

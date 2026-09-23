@@ -51,8 +51,9 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="인덱스를 삭제 후 재생성(파괴적·스키마 변경 시만). 기본은 비파괴 upsert.",
     )
-    # 점수 융합을 서버가 아니라 클라이언트에서 하게 바뀌어 ``--ensure-pipeline`` 옵션은
-    # 제거됐다(등록할 서버 파이프라인이 없음). 재색인 도구는 인덱스 동기화에만 집중한다.
+    # 이력: 027 이 통합 검색의 점수 융합을 서버에서 클라이언트로 옮기며 ``--ensure-pipeline``
+    # 을 제거했다(그때는 등록할 서버 파이프라인이 없었다). 그 뒤 **파일 검색이 생기며 엔진
+    # 융합을 쓰게 돼** 필요가 되살아났고, 101 에서 기본 켜짐으로 되살렸다(위 --no-ensure-pipeline).
     return p
 
 
@@ -146,7 +147,15 @@ def format_report(report: dict[str, Any], *, doc_count: int | None = None) -> st
         line += f" | 파이프라인: {report['pipeline']}"
     if report["errors"]:
         line += f"\n  ⚠️ 오류 샘플: {report['errors'][:2]}"
-    if report["status"] == "analysis-stale":
+    if report["status"] == "mapping-stale":
+        # 🔴 가장 심한 어긋남 — 필드 타입이 코드와 다르다. 대표 사례는 1536D 벡터가 `float`
+        #    으로 잡힌 자동 생성 색인이고, 그 색인은 **벡터 검색이 전부 죽는다**(101 실측).
+        line += (
+            "\n  🔴 필드 타입이 코드와 다르다 — 벡터가 knn_vector 가 아니면 **뜻으로 찾기가 "
+            "전부 실패한다**. 타입은 덧붙여 못 고치니 --recreate 로 다시 만들어야 한다"
+            "(재색인 동안 검색이 비어 보인다)."
+        )
+    elif report["status"] == "analysis-stale":
         # 코어 ensure_index 가 알린 어긋남 — 문서는 들어갔지만 옛 분석기로 쪼개져 있다.
         line += (
             "\n  🔴 분석기 설정이 코드와 다르다 — 이 색인의 문서는 옛 분석기로 쪼개진다. "

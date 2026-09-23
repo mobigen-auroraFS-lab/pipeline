@@ -40,9 +40,17 @@ class TestParser(unittest.TestCase):
         self.assertEqual(args.index, "assets_bge")
         self.assertTrue(args.recreate)
 
-    def test_pipeline_option_removed(self) -> None:
-        # 027: 서버 융합 파이프라인이 클라이언트 융합으로 이동해 --ensure-pipeline 옵션은 제거됐다 —
-        # 미지원 인자는 argparse 가 SystemExit 로 거부한다(잔존 참조 0의 행동 봉인).
+    def test_pipeline_registration_is_on_by_default(self) -> None:
+        # 이력: 027 이 통합 검색의 융합을 서버→클라이언트로 옮기며 --ensure-pipeline 을 지웠다.
+        # 그 뒤 **파일 검색이 엔진 융합을 쓰게 돼** 필요가 되살아났고, 101 에서 되살렸다.
+        # 🔴 기본이 켜짐이어야 한다 — 없으면 /file-search 가 500 이라 「옵션」이 아니다.
+        self.assertTrue(rr._build_parser().parse_args([]).ensure_pipeline)
+        self.assertFalse(
+            rr._build_parser().parse_args(["--no-ensure-pipeline"]).ensure_pipeline)
+
+    def test_old_ensure_pipeline_flag_is_not_accepted(self) -> None:
+        # 옛 이름(--ensure-pipeline)은 받지 않는다 — 기본이 켜짐이라 켜는 플래그가 불필요하고,
+        # 옛 문서를 보고 친 사람이 "켰다"고 오해하지 않도록 argparse 가 거부하게 둔다.
         with self.assertRaises(SystemExit):
             rr._build_parser().parse_args(["--ensure-pipeline"])
 

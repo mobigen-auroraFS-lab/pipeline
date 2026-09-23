@@ -105,6 +105,35 @@ class TestEnsureIndexOnIngest(unittest.TestCase):
             index = pipeline_steps._make_opensearch_indexer(db=_Db(), settings=_settings())
             index("asset-1")  # 예외가 밖으로 나오면 실패다
 
+    def test_실패하면_다음_자산에서_다시_시도한다(self) -> None:
+        """🔴 기존 계약 — "첫 연결이 실패하면 캐시에 담기지 않아 자산마다 다시 시도한다".
+
+        배치 도중 검색 엔진이 복구되면 그때부터 재사용을 재개하려는 의도다(재시도 상한 =
+        배치 크기). 셋업 **도중에** 캐시를 채우면 이 계약이 깨진다 — 반쯤 채워진 캐시 때문에
+        다음 자산부터 셋업 블록을 건너뛰고, 엉뚱한 `KeyError` 로 죽어 **원인이 로그에서 사라진다.**
+
+        2026-09-23 실측 회귀: `ensure_index` 를 캐시 확정 뒤에 두었더니 3건 배치에서 시도가
+        1회뿐이었고 색인은 0건이었다(코드 리뷰에서 발견).
+        """
+        p = _Patches(ensure_raises=True)
+        with p.applied():
+            index = pipeline_steps._make_opensearch_indexer(db=_Db(), settings=_settings())
+            for i in range(3):
+                index(f"asset-{i}")
+        self.assertEqual(len(p.ensure_calls), 3, "자산마다 다시 시도해야 한다")
+
+    def test_실패_뒤_복구되면_재사용을_재개한다(self) -> None:
+        """배치 도중 엔진이 살아나면 그 뒤로는 캐시를 쓴다 — 계약의 나머지 절반."""
+        p = _Patches(ensure_raises=True)
+        with p.applied():
+            index = pipeline_steps._make_opensearch_indexer(db=_Db(), settings=_settings())
+            index("asset-0")            # 실패
+            p._ensure_raises = False    # 엔진 복구
+            index("asset-1")            # 성공 — 여기서 캐시 확정
+            index("asset-2")            # 캐시 재사용
+        self.assertEqual(len(p.ensure_calls), 2, "복구 뒤에는 다시 부르지 않는다")
+        self.assertEqual(p.index_calls, ["asset-1", "asset-2"])
+
     def test_토글이_꺼져_있으면_아무것도_안_한다(self) -> None:
         """검색 엔진 코드를 아예 건드리지 않는다(opensearch-py 미설치 환경 보호)."""
         p = _Patches()
