@@ -27,6 +27,8 @@ from typing import Any
 # sync_all 은 opensearch_sync 의 순수/지연 import 설계상 모듈 상단에서 안전하게 가져올 수 있다
 # (opensearch-py 는 sync_all 내부에서 실제 호출 시에만 지연 import). 따라서 본 모듈 import 만으로는
 # opensearch-py 미설치 환경에서도 깨지지 않는다 — 단위 테스트가 OS 없이 run_resync 를 덮을 수 있는 이유.
+from src.search.file_search import SEARCH_PIPELINE_DEFAULT
+from src.search.opensearch_search import ensure_search_pipeline
 from src.search.opensearch_sync import sync_all
 
 
@@ -38,6 +40,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--env", choices=["dev", "prod"], default="dev")
     p.add_argument("--channel", default=None, help="임베딩 채널(미지정=활성 프로파일)")
     p.add_argument("--index", default=None, help="OpenSearch 인덱스(미지정=OPENSEARCH_INDEX)")
+    # 🔴 기본 켜짐 — 파일 검색이 이 파이프라인을 쓰는데 없으면 500 이다(101 G2).
+    #    「옵션」이 아니라 **빈 환경에서 반드시 필요한 것**이라 기본값을 끄지 않는다.
+    p.add_argument(
+        "--no-ensure-pipeline", dest="ensure_pipeline", action="store_false", default=True,
+        help="검색 파이프라인 등록을 건너뛴다(이미 손으로 관리 중인 환경용)",
+    )
     p.add_argument(
         "--recreate",
         action="store_true",
@@ -92,6 +100,31 @@ def run_resync(
     }
 
 
+def run_ensure_pipeline(
+    *,
+    client: Any,
+    name: str,
+    weights: tuple[float, float],
+    ensure_fn: Callable[..., str] = ensure_search_pipeline,
+) -> str:
+    """검색 파이프라인을 멱등 등록하는 **조립부**(101 G2).
+
+    주입받은 함수를 1회 부르고 결과를 그대로 돌려준다 — 검색 엔진 없이 단위 검증된다
+    (``run_resync`` 와 같은 모양).
+
+    Args:
+        client: 검색 엔진 클라이언트.
+        name: 파이프라인 이름. 정본은 코어 상수 ``SEARCH_PIPELINE_DEFAULT``.
+        weights: ``(BM25, kNN)`` 가중치. 🔴 정본은 설정 ``OPENSEARCH_FUSION_WEIGHTS`` 이며,
+            등록값이 그와 다르면 **검색 순위가 조용히 어긋난다**.
+        ensure_fn: 등록 함수(주입 seam · 기본은 코어 ``ensure_search_pipeline``).
+
+    Returns:
+        ``'created'`` 또는 ``'exists'``.
+    """
+    return ensure_fn(client, name, weights=weights)
+
+
 def format_report(report: dict[str, Any], *, doc_count: int | None = None) -> str:
     """복구 결과를 사람이 읽는 한 줄로 만든다(순수 함수).
 
@@ -109,6 +142,8 @@ def format_report(report: dict[str, Any], *, doc_count: int | None = None) -> st
     )
     if doc_count is not None:
         line += f" | 인덱스 총문서: {doc_count}"
+    if report.get("pipeline"):
+        line += f" | 파이프라인: {report['pipeline']}"
     if report["errors"]:
         line += f"\n  ⚠️ 오류 샘플: {report['errors'][:2]}"
     if report["status"] == "analysis-stale":
@@ -173,9 +208,23 @@ def main() -> int:
             noise_patterns=cfg.opensearch.filename_noise_patterns,
         )
 
+    # 🔴 색인 생성과 **같은 시점**에 검색 파이프라인도 보장한다(101 G2). 파일 검색이 이것을
+    #    쓰는데 없으면 500 이다 — 빈 환경에서 사람이 손으로 PUT 하던 것을 없앤다.
+    #    DB 를 만지기 전에 해 둔다(검색 엔진 쪽 준비를 한 자리에 모은다).
+    if args.ensure_pipeline:
+        report_pipeline = run_ensure_pipeline(
+            client=client,
+            name=SEARCH_PIPELINE_DEFAULT,
+            weights=cfg.search.fusion_weights,
+        )
+    else:
+        report_pipeline = None
+
     with db:
         # 읽기 전용 트랜잭션 — 원본을 고치지 않는다. 같은 자산을 다시 넣으면 덮어쓰므로 재시도도 안전하다.
         report = db.execute_in_transaction(_resync_txn, idempotent=True)
+    if report_pipeline:
+        report["pipeline"] = report_pipeline
 
     doc_count = client.count(index=index).get("count")
     print(format_report(report, doc_count=doc_count))

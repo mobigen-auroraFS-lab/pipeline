@@ -110,10 +110,17 @@ def _make_opensearch_indexer(*, db: PostgresUtil, settings: Any) -> Callable[[An
             if "client" not in cache:
                 # 지연 import — 플래그 off 환경(opensearch-py 미설치 가능)의 순수성을 보존한다.
                 from src.config.settings import active_embed_channel
-                from src.search.opensearch_sync import get_client, index_asset
+                from src.search.opensearch_sync import ensure_index, get_client, index_asset
 
                 cache["channel"] = active_embed_channel(settings)  # 적재·검색이 같은 채널을 봐야 한다
                 cache["client"] = get_client(settings.opensearch.url)  # 배치당 1회 생성·재사용
+                # 🔴 색인이 없으면 **먼저 만든다**(101 G1). 없는 색인에 문서를 넣으면 검색 엔진이
+                #    값 모양만 보고 자동으로 만드는데, 1536D 벡터가 `float` 으로 잡혀 **벡터 검색이
+                #    전부 죽는다**(2026-09-22 k8s 신규 환경 실측). 타입은 나중에 못 바꾼다 —
+                #    색인을 지우고 재색인해야 한다. 그래서 첫 문서보다 먼저 와야 한다.
+                #    배치당 1회다(이 블록이 캐시 셋업이라 한 번만 돈다) — 자산마다 부르면
+                #    존재 확인이 자산 수만큼 날아간다.
+                ensure_index(cache["client"], settings.opensearch.index)
                 cache["index_asset"] = index_asset
             # DB 는 읽기만, 쓰기는 검색 엔진에만(헌법 6조). 저장 트랜잭션과 분리된 별도 트랜잭션이다.
             with db.transaction() as conn:

@@ -129,8 +129,22 @@ Airflow 없이 로컬에서 바로 확인하려면:
 python -m processing.app.run_ingest    --env dev <파일>            # per-asset 수집·처리
 python -m processing.app.run_relations --env dev --all             # cross-asset 관계 생성
 python -m processing.app.run_search    --env dev --query "<질의>"   # 검색(코어 위임)
-python -m processing.app.run_opensearch_resync --env dev           # 색인 재생성
+python -m processing.app.run_opensearch_resync --env dev           # 색인·검색 파이프라인 준비
 ```
+
+**빈 환경에서 처음 띄울 때**는 `run_opensearch_resync` 를 한 번 돌립니다 — 자산 색인을 올바른
+매핑(1536D `knn_vector` · nori)으로 만들고, 파일 검색이 쓰는 검색 파이프라인(`assets-hybrid`)을
+등록합니다. 둘 다 **없으면 검색이 죽습니다.**
+
+| 플래그 | 뜻 |
+|---|---|
+| (기본) | 색인 보강 + 파이프라인 등록(멱등 — 있으면 손대지 않음) |
+| `--recreate` | ⚠️ **색인을 지우고 다시 만든다** — 매핑을 바꿨을 때만. 재색인이 끝날 때까지 검색이 비어 보인다 |
+| `--no-ensure-pipeline` | 파이프라인 등록을 건너뛴다(이미 손으로 관리하는 환경용) |
+
+> 🟢 **적재만 해도 색인은 만들어집니다**(적재 훅이 보장 · spec 101). 이 도구는 **미리 준비**하거나
+> **고칠 때** 씁니다. 예전에는 이것을 빠뜨리면 첫 문서가 들어갈 때 검색 엔진이 색인을 **제멋대로**
+> 만들어(1536D 벡터를 `float` 으로) 벡터 검색이 전부 죽었습니다.
 
 Airflow 로 상시 운영하려면 — DAG 폴더를 지정해 네이티브로 띄웁니다.
 

@@ -83,10 +83,15 @@ def _os_settings(*, enabled: bool, channel: str = "st") -> types.SimpleNamespace
 
 @contextlib.contextmanager
 def _patched_os_sync():
-    """지연 import 되는 ``src.search.opensearch_sync`` 를 가짜 모듈로 대체 — index_asset/get_client 기록."""
+    """지연 import 되는 ``src.search.opensearch_sync`` 를 가짜 모듈로 대체 — index_asset/get_client 기록.
+
+    101 G1 부터 훅이 ``ensure_index`` 도 부른다 — 대역에 없으면 import 가 실패해 훅 전체가
+    조용히 건너뛰어진다(예외를 삼키는 경로라 오류도 안 난다).
+    """
     fake = types.ModuleType("src.search.opensearch_sync")
     fake.index_asset = mock.MagicMock(name="index_asset")
     fake.get_client = mock.MagicMock(name="get_client", return_value=mock.MagicMock())
+    fake.ensure_index = mock.MagicMock(name="ensure_index", return_value="created")
     with mock.patch.dict(sys.modules, {"src.search.opensearch_sync": fake}):
         yield fake
 
