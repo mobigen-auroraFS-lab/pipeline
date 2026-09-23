@@ -52,10 +52,15 @@ class _RecordingModule(types.ModuleType):
         self.accessed: list[str] = []
         self.index_asset = mock.MagicMock(name="index_asset")
         self.get_client = mock.MagicMock(name="get_client", return_value=mock.MagicMock())
+        # 101 G1 — 훅이 색인 존재를 보장한다. 대역에 없으면 import 가 실패해 훅 전체가 조용히
+        # 건너뛰어진다(예외를 삼키는 경로라 오류도 안 난다).
+        self.ensure_index = mock.MagicMock(name="ensure_index", return_value="created")
 
     def __getattribute__(self, name: str):
         # 내부 속성(accessed/index_asset/get_client/dunder)은 기록 대상에서 제외, 그 외 접근만 기록.
-        if not name.startswith("_") and name not in {"accessed", "index_asset", "get_client"}:
+        if not name.startswith("_") and name not in {
+            "accessed", "index_asset", "get_client", "ensure_index",
+        }:
             object.__getattribute__(self, "accessed").append(name)
         return object.__getattribute__(self, name)
 
