@@ -1,231 +1,273 @@
 # dataplatform-pipeline
 
-멀티모달 데이터 통합 플랫폼의 **처리 파이프라인**입니다. 파일 수집 → 분류 → 추출 → 임베딩 → 적재 →
-색인 → 관계 생성을 Airflow 로 오케스트레이션합니다.
+멀티모달 데이터 통합 플랫폼에서 파일을 받아 검색 가능한 상태로 만드는 처리 레포입니다.
 
-> 국책과제 **RS-2025-02215256** 산출물.
+## 이 레포지토리는 무엇인가
 
-## 세 레포의 관계
+지정한 폴더에 파일이 들어오면 자산으로 등록하고, 종류를 가려 요약과 키워드를 뽑고,
+벡터로 바꿔 데이터베이스와 검색 색인에 넣습니다. 그다음 자산들 사이의 관계를 찾고, 여러
+자산에 공통으로 등장하는 개체를 묶습니다. 이 과정을 Airflow 로 자동화합니다.
 
-| 레포 | 파이썬 패키지 | 역할 |
+| 저장소 | 하는 일 |
+|---|---|
+| [core](https://github.com/mobigen-auroraFS-lab/core) | 공통 코드 · 데이터베이스 스키마 |
+| **pipeline** (이 레포) | 파일 수집 · 분류 · 메타데이터 추출 · 색인 · 자산 간 관계 생성 |
+| [service](https://github.com/mobigen-auroraFS-lab/service) | 웹 화면이 사용하는 HTTP API |
+
+**작업 대기열로 메시지 브로커를 쓰지 않습니다.** 대신 PostgreSQL 에 적힌 자산의 상태가
+대기열 역할을 합니다(`received` → `processing` → `registered` / `deferred` / `failed`).
+상태를 바꿀 때 조건을 걸어 갱신하므로, 작업자가 여럿이어도 같은 자산을 두 번 집지 않습니다.
+
+## 디렉터리 구조
+
+```
+processing/
+  app/             # 실행 진입점. 명령줄에서 직접 돌리는 스크립트들
+  ingest/          # 파일 수집, 자산 등록, 상태 관리, 배치 실행
+  classify/        # 자산의 주제 분류
+  extractors/      # 파일에서 기본 정보 추출 (재생 시간, 해상도 등)
+  preprocess/      # 영상 키프레임 추출, 음성 인식 등 무거운 전처리
+  skills/          # 종류별(텍스트·이미지·영상·오디오) 처리 묶음
+  pipeline/        # 처리 단계를 조합하는 틀과 도메인별 설정
+  dispatch/        # 자산 종류에 따라 어느 처리를 돌릴지 결정
+
+deploy/airflow/dags/   # Airflow DAG 5개
+tests/                 # 단위 테스트
+```
+
+새 파일 종류를 지원하려면 `skills/` 에 추가하고 `dispatch/` 에 연결합니다. 처리 순서
+자체를 바꾸려면 `pipeline/` 을 봅니다.
+
+## 사용 환경
+
+### 하드웨어
+
+**세 레포 중 이 레포가 가장 무겁습니다.** 메타데이터 추출과 임베딩이 전부 여기서 돌기
+때문입니다.
+
+| 구분 | 최소 | 권장 | 넉넉히 |
+|---|---|---|---|
+| CPU | 4 코어 | 8 코어 | 16 코어 |
+| 메모리 | 8 GB | 16 GB | 32 GB |
+| GPU | 불필요 | 불필요 | 선택 |
+
+권장 사양의 근거는 실제 처리 경험입니다. 10코어·메모리 16GB 장비에서 자산 20,505건을
+처음부터 끝까지 처리했습니다. 운영 클러스터에서는 아래처럼 할당했습니다.
+
+| 구성요소 | 평소 | 최대 | 실제 사용량 |
+|---|---|---|---|
+| Airflow 스케줄러 (실제 처리가 도는 곳) | 2 코어 · 6 GB | 4 코어 · 12 GB | 4.1 GB |
+| PostgreSQL | 0.5 코어 · 1 GB | 2 코어 · 4 GB | 0.1 GB |
+| OpenSearch | 0.5 코어 · 3 GB | 2 코어 · 5 GB | 2.6 GB |
+| 그 밖 (API · DAG 처리기 · 도구) | 1.4 코어 · 3 GB | 6 코어 · 13 GB | 0.6 GB |
+| 합계 | 4.4 코어 · 13 GB | 14 코어 · 34 GB | 7.8 GB |
+
+메모리는 OpenSearch 와 Airflow 스케줄러가 대부분을 씁니다. 검색 엔진은 켜 두기만 해도
+2~3GB 를 잡고 있고, 스케줄러는 영상을 처리할 때 순간적으로 크게 씁니다. 메모리가 모자라면
+영상 처리 도중에 프로세스가 죽습니다. CPU 보다 메모리를 먼저 늘리십시오.
+
+GPU 는 기본 구성에서 필요 없습니다. 임베딩과 LLM 을 별도 서버에 맡기기 때문입니다. 이
+서버에서 직접 모델을 돌리려면(`EMBED_ACTIVE_CHANNEL` 을 로컬로 바꾸거나
+`EMBED_ENABLE_CLIP=true`) 그때 GPU 를 검토하십시오. 없어도 CPU 로 동작하지만 느립니다.
+
+디스크는 원본 파일 보관 폴더가 대부분을 차지합니다. 이 폴더는 service 레포와 같은 경로를
+공유해야 합니다. 파일 내려받기와 미리보기가 데이터베이스에 적힌 경로를 그대로 읽기
+때문입니다.
+
+| 항목 | 자산 1건당 | 1만 건 | 10만 건 |
+|---|---|---|---|
+| 원본 파일 | 1.6 MB | 16 GB | 160 GB |
+| PostgreSQL | 66 KB | 0.7 GB | 6.6 GB |
+| OpenSearch 색인 | 6.8 KB | 70 MB | 0.7 GB |
+| 모델 캐시 | — | 2~10 GB | 2~10 GB |
+
+모델 캐시는 자산 수와 무관한 고정값이지만 구성에 따라 차이가 큽니다. 임베딩을 별도 서버에
+맡기면 음성 인식 모델만 내려받아 2GB 정도, 임베딩과 이미지 모델까지 이 서버에서 돌리면
+10GB 를 넘습니다.
+
+### 소프트웨어
+
+| 항목 | 요구 버전 | 개발 확인 |
 |---|---|---|
-| dataplatform-core | `src.*` | 규약·계약·순수 로직 + DB 스키마 정본 |
-| **dataplatform-pipeline**(이 레포) | `processing.*` | 실행 오케스트레이션(Airflow DAG·CLI) |
-| dataplatform-service | `service.*` | HTTP API |
+| Python | 3.13 이상 | 3.13.13 |
+| Apache Airflow | 3.x | 3.2.1 |
+| PostgreSQL | 17 + pgvector 확장 | 17.9 · pgvector 0.8.2 |
+| OpenSearch | 3.x | 3.6.0 |
+| ffmpeg | — | 8.1.1 |
+| tesseract (한국어 데이터 포함) | — | 5.5.2 |
+| faster-whisper | — | 1.2.1 |
+| core 라이브러리 | v0.7.0 이상 | — |
 
-**이 레포는 코어를 필요로 합니다.** 코어가 없으면 `processing.*` 이 import 되지 않습니다.
+Airflow 는 `pyproject.toml` 에 넣지 않았습니다. 실행 환경(도커 이미지나 conda)이 제공하는
+버전과 충돌하지 않게 하기 위해서입니다.
 
-## 아키텍처 — 브로커 없이 "PostgreSQL 상태 = 작업 큐"
+Airflow 는 자체 데이터베이스를 씁니다. 플랫폼 데이터베이스와 **분리**해야 합니다.
 
-별도 메시지 브로커(RabbitMQ 등)를 두지 않습니다. 자산의 처리 상태가 PostgreSQL 에 있고,
-Airflow DAG 가 그 상태를 조회해 다음 할 일을 집습니다. 상태가 곧 큐이므로 큐와 DB 가 어긋날 수 없습니다.
-
-DAG 3종:
-
-| DAG | 하는 일 |
-|---|---|
-| `dag_collect` | inbox 감시 → 자산 등록(수집) |
-| `dag_process` | per-asset 처리 — 분류·추출·요약·임베딩·적재·색인 |
-| `dag_relations` | cross-asset 관계 후보 생성 → LLM 제안 → 엣지 저장 |
-
-## 요구사항
-
-| 항목 | 버전 |
-|---|---|
-| Python | **3.13 이상** |
-| Apache Airflow | **3.x** |
-| PostgreSQL | 17 + `pgvector` (코어 스키마) · Airflow 메타DB 별도 |
-| OpenSearch | `analysis-nori` 플러그인 |
-| 시스템 도구 | `ffmpeg`(영상·오디오) · `tesseract`(이미지 OCR) |
-
-## 설치
-
-**코어를 먼저 설치합니다.**
+## 설치 방법
 
 ```bash
-# ① 코어 — 나란히 clone 해서 참조형으로 설치(개발) 또는 태그로 설치형
-git clone <이 레포와 같은 계정>/dataplatform-core.git   # 예: gh repo clone <owner>/dataplatform-core
-pip install -e ./dataplatform-core
+# 1. 시스템 도구
+brew install ffmpeg tesseract tesseract-lang              # macOS
+sudo apt install ffmpeg tesseract-ocr tesseract-ocr-kor   # Linux
 
-# ② 이 레포
+# 2. core 라이브러리
+pip install "meta-extract @ git+https://github.com/mobigen-auroraFS-lab/core.git@v0.7.0"
+
+# 3. 이 레포
 pip install -e .
 ```
 
-코어를 설치하면 코어 런타임 의존(psycopg·numpy·torch·transformers·pillow·opensearch-py 등)이
-**전이로** 따라옵니다. 이 레포의 `pyproject.toml` 에는 코어가 제공하지 않는 파이프라인 전용
-의존(opencv·faster-whisper·scenedetect·soundfile·pytesseract)만 있습니다.
+### 데이터베이스 준비 (최초 1회)
 
-> `apache-airflow` 는 어느 목록에도 없습니다 — 실행 환경이 제공하는 버전과 핀이 충돌하는 것을 막기 위함입니다.
-
-## 스키마·시드 (최초 1회)
-
-파이프라인을 돌리기 전에 **코어 레포에서** 다음을 마칩니다.
+스키마는 core 레포가 관리합니다. 이 레포에는 마이그레이션 도구가 없으므로 core 를 내려받아
+실행합니다.
 
 ```bash
-alembic -c alembic.ini upgrade head                        # DB 스키마
-python -m scripts.seed_topic_registry --env dev --apply    # ★ 닫힌 taxonomy 시드
+git clone --branch v0.7.0 https://github.com/mobigen-auroraFS-lab/core.git
+cd core
+pip install -e ".[migrate]"
+alembic -c alembic.ini upgrade head
+python -m scripts.seed_topic_registry --env dev --apply
 ```
 
-> ⚠️ **시드를 생략하면 관계 생성 결과가 0건이 됩니다.**
+마지막 줄을 빠뜨리면 자산 간 관계가 하나도 만들어지지 않습니다. 오류는 나지 않습니다.
 
-## 환경변수
+## 실행 및 운영 방법
 
-템플릿이 있습니다 — 복사해서 값만 채우면 됩니다:
+### 설정
 
-```bash
-cp .env.example .env.dev      # .env.dev 는 커밋되지 않습니다(.gitignore)
-```
+core 가 요구하는 값(core README 참고)에 더해 아래를 설정합니다.
 
-### 설정을 주는 두 가지 방법
+| 변수 | 용도 |
+|---|---|
+| `WATCHER_INBOX_DIR` | 처리할 파일을 넣어 두는 폴더 |
+| `WATCHER_ARCHIVE_DIR` | 처리가 끝난 원본을 보관하는 폴더. service 레포와 공유합니다 |
+| `META_ENV` | `dev` 또는 `prod` |
+| `DAG_PROCESS_LIMIT` | 한 번에 처리할 자산 수 |
+| `DAG_PROCESS_MAX_FAILURES` | 연속 실패 허용 횟수 |
+| `MM_META_DISCOVERY_MODE` | `propose`(후보만 보고, 기본값) 또는 `auto`(자동 등록) |
 
-| 방법 | 어디에 | 우선순위 |
-|---|---|---|
-| **A. `.env.<환경>` 파일** | **실행하는 디렉터리** → 없으면 레포 루트 순으로 찾습니다 | 낮음 |
-| **B. 환경변수 직접 주입** | 배포·컨테이너·CI(`export` · `env_file:` · `env:`) | **높음**(A 를 덮어씁니다) |
-
-방법 B 로 파일 값을 그대로 올리려면:
+설정 파일의 값을 **프로세스 환경변수로 올려야** 합니다. Airflow 작업이 그 환경을
+물려받기 때문입니다.
 
 ```bash
 set -a; . ./.env.dev; set +a
 ```
 
-### 🔴 필수 — 없으면 기동 시점에 실패합니다
+### 명령줄에서 직접 돌리기
 
-코어 설정 로더가 다음 11개를 **필수로 요구**합니다(미설정 시 `ValueError: 필수 환경변수 누락: <이름>`
-으로 즉시 중단 — 잘못된 설정으로 조용히 도는 것을 막는 fail-fast).
-
-```dotenv
-META_MODEL=              # 온프레미스 LLM 모델 이름
-ENCODING=utf-8
-CHUNK_SIZE=1000
-OVERLAP_SIZE=100
-SUMMARY_MAX_CHARS=500
-TOP_K_KEYWORDS=10
-TEXT_EMBED_MODEL=
-TEXT_EMBED_CHUNK_SIZE=512
-TEXT_EMBED_NORMALIZE=true
-OPENAI_BASE_URL=         # OpenAI 호환 엔드포인트(= 온프레미스 LLM 서버)
-OPENAI_API_KEY=
-```
-
-### 그 외
-
-| 구분 | 변수 |
-|---|---|
-| DB | `POSTGRES_HOST` · `POSTGRES_PORT` · `POSTGRES_DB` · `POSTGRES_USER` · `POSTGRES_PASSWORD` |
-| 검색 | `OPENSEARCH_HOST` · `OPENSEARCH_PORT` |
-| LLM | `LLM_BASE_URL` · `LLM_MODEL` |
-| 데이터 경로 | `WATCHER_INBOX_DIR`(수집 대기) · `WATCHER_ARCHIVE_DIR`(보관) |
-| DAG 튜닝(선택) | `META_ENV` · `DAG_COLLECT_SCHEDULE` · `DAG_PROCESS_SCHEDULE` · `DAG_RELATIONS_SCHEDULE` · `DAG_PROCESS_LIMIT` · `DAG_PROCESS_MAX_FAILURES` · `DAG_PROCESS_POOL` · `DAG_RELATIONS_LIMIT` |
-
-> ⚠️ 보관 디렉터리는 **HTTP API 레포와 공유**합니다(다운로드·썸네일이 같은 파일을 읽습니다).
-> 두 레포에 같은 경로를 지정하십시오.
-
-## 실행
-
-Airflow 없이 로컬에서 바로 확인하려면:
+Airflow 없이 한 단계씩 확인할 때 씁니다.
 
 ```bash
-python -m processing.app.run_ingest    --env dev <파일>            # per-asset 수집·처리
-python -m processing.app.run_relations --env dev --all             # cross-asset 관계 생성
-python -m processing.app.run_search    --env dev --query "<질의>"   # 검색(코어 위임)
-python -m processing.app.run_opensearch_resync --env dev           # 색인·검색 파이프라인 준비
+# 수집과 처리
+python -m processing.app.run_ingest    --env dev <파일 또는 폴더>
+python -m processing.app.run_relations --env dev --all
+python -m processing.app.run_search    --env dev --query "<검색어>"
+
+# 개체 관련
+python -m processing.app.run_mm_classify      --env dev   # 분류 기준으로 자산 판정
+python -m processing.app.run_mm_meta_binding  --env dev   # 개체 묶기
+python -m processing.app.run_entity_embedding --env dev   # 개체 색인
+python -m processing.app.run_entity_label     --env dev   # 개체 라벨 판정
+
+# 색인 복구
+python -m processing.app.run_opensearch_resync --env dev              # 빠진 것만 채움
+python -m processing.app.run_opensearch_resync --env dev --recreate   # 지우고 다시 만듦
 ```
 
-**빈 환경에서 처음 띄울 때**는 `run_opensearch_resync` 를 한 번 돌립니다 — 자산 색인을 올바른
-매핑(1536D `knn_vector` · nori)으로 만들고, 파일 검색이 쓰는 검색 파이프라인(`assets-hybrid`)을
-등록합니다. 둘 다 **없으면 검색이 죽습니다.**
+재색인 도구는 검색 결과를 합치는 데 쓰는 설정(`assets-hybrid`)도 함께 등록합니다. 이것이
+없으면 파일 검색 API 가 500 오류를 냅니다. 이미 직접 관리하고 있다면
+`--no-ensure-pipeline` 으로 끌 수 있습니다.
 
-| 플래그 | 뜻 |
-|---|---|
-| (기본) | 색인 보강 + 파이프라인 등록(멱등 — 있으면 손대지 않음) |
-| `--recreate` | ⚠️ **색인을 지우고 다시 만든다** — 매핑을 바꿨을 때만. 재색인이 끝날 때까지 검색이 비어 보인다 |
-| `--no-ensure-pipeline` | 파이프라인 등록을 건너뛴다(이미 손으로 관리하는 환경용) |
-
-> 🟢 **적재만 해도 색인은 만들어집니다**(적재 훅이 보장 · spec 101). 이 도구는 **미리 준비**하거나
-> **고칠 때** 씁니다. 예전에는 이것을 빠뜨리면 첫 문서가 들어갈 때 검색 엔진이 색인을 **제멋대로**
-> 만들어(1536D 벡터를 `float` 으로) 벡터 검색이 전부 죽었습니다.
-
-Airflow 로 상시 운영하려면 — DAG 폴더를 지정해 네이티브로 띄웁니다.
+### Airflow 로 돌리기
 
 ```bash
-export AIRFLOW_HOME=~/airflow-home                    # 메타DB·설정 위치(임의)
+set -a; . ./.env.dev; set +a          # 먼저 실행해야 작업이 환경을 물려받습니다
+export AIRFLOW_HOME=~/airflow-home
 export AIRFLOW__CORE__DAGS_FOLDER=$PWD/deploy/airflow/dags
 export AIRFLOW__CORE__LOAD_EXAMPLES=False
-export META_ENV=dev                                   # 코어 설정 프로파일
+export META_ENV=dev
 
-airflow db migrate                                    # 최초 1회
-airflow scheduler &                                   # 스케줄러
-airflow dag-processor &                               # DAG 파싱(3.x 는 별 프로세스)
-airflow api-server &                                  # UI/API
+airflow db migrate                    # 최초 1회
+airflow scheduler &
+airflow dag-processor &
+airflow api-server &
 ```
 
-> ⚠️ **DAG 태스크는 앱 환경변수를 프로세스 환경에서 물려받습니다.** `META_MODEL` 등이 빠지면
-> 태스크가 `init_settings` 에서 즉시 실패합니다 → Airflow 를 띄우기 **전에** `.env.dev` 값을
-> 환경으로 올리십시오: `set -a; . ./.env.dev; set +a`
->
-> ⚠️ Airflow 메타DB는 앱 DB와 **분리**하십시오(같은 이름을 쓰면 충돌합니다).
-> GPU·모델을 쓰는 태스크는 동시 실행을 1로 제한하는 pool 을 두는 것이 안전합니다.
+DAG 는 다섯 개이고 시간을 엇갈려 배치했습니다. 앞 단계가 끝난 뒤 다음이 돌도록 한 것입니다.
+각 DAG 는 처리할 것이 남아 있으면 끝에서 자기를 다시 호출하므로, 한 주기에 다 끝내지
+못해도 이어서 진행합니다.
 
-## 테스트
+| DAG | 하는 일 | 변수 | 기본 주기 |
+|---|---|---|---|
+| `dag_collect` | 폴더를 살펴 새 파일을 자산으로 등록 | `DAG_COLLECT_SCHEDULE` | 5분마다 |
+| `dag_process` | 등록된 자산을 처리하고 색인 | `DAG_PROCESS_SCHEDULE` | 매시 정각 |
+| `dag_relations` | 자산 간 관계 생성 | `DAG_RELATIONS_SCHEDULE` | 매시 30분 |
+| `dag_mm_meta` | 개체 묶기 | `DAG_MM_META_SCHEDULE` | 매시 45분 |
+| `dag_mm_classify` | 분류 기준으로 자산 판정 | `DAG_MM_CLASSIFY_SCHEDULE` | 매시 50분 |
+
+### 운영 시 확인할 것
+
+| 상황 | 할 일 |
+|---|---|
+| core 를 새 버전으로 올렸을 때 | core 재설치 → 테스트 → 재색인 도구 실행 |
+| 파일을 많이 넣기 전 | 개체 제외 목록(`EXCLUDED_ENTITIES`·`STOP_PATTERNS`) 확인. 자동화되지 않는 유일한 단계입니다 |
+| `MM_META_DISCOVERY_MODE=auto` 로 바꿨을 때 | 대량 수집이 끝나면 `propose` 로 되돌리기 |
+| GPU 나 모델을 쓰는 작업 | Airflow 풀로 동시 실행 수를 1 로 제한 |
+
+재색인과 수집은 여러 번 돌려도 안전합니다. 같은 파일은 해시로 걸러냅니다.
+
+## 실행 예제
 
 ```bash
-python -m unittest discover -s tests    # 순수 단위(실 DB·모델 불필요분은 자동 skip)
+$ python -m processing.app.run_ingest --env dev ./inbox/sample.mp4
+[run_ingest] collected=1 registered=1 skipped=0 failed=0
+
+$ python -m processing.app.run_ingest --env dev ./inbox/manifest.json
+[run_ingest] collected=0 registered=0 skipped=1 (ledger_file)
+
+$ python -m processing.app.run_opensearch_resync --env dev --recreate
+[OpenSearch 복구 재색인] http://<host>:9200 (v3.6.0) → index='assets' channel='st_api' recreate=True
+  인덱스 상태: recreated | 색인 성공: 1526 | 오류: 0 | 인덱스 총문서: 1526 | 파이프라인: created
+
+$ python -m processing.app.run_relations --env dev --all
+[run_relations] 후보 N쌍 · 제안 M건 · 저장 K건
 ```
 
-## 구조
+두 번째 예의 `ledger_file` 은 목록 파일이라 자산으로 등록하지 않았다는 뜻입니다.
+건수는 데이터에 따라 달라집니다.
 
-```
-processing/
-  app/          실행 진입점(run_ingest · run_relations · run_search · run_opensearch_resync)
-  classify/     도메인·모달리티 분류
-  dispatch/     라우팅
-  extractors/   모달리티별 메타데이터 추출
-  ingest/       수집·적재·상태 전이·배치 러너
-  pipeline/     v2 모듈 조합 레이어(계약·레지스트리·도메인 팩·정책)
-  preprocess/   전처리(STT · 키프레임 · 장면 분할)
-  skills/       요약·캡션 등 보조 기능
-deploy/airflow/ DAG 3종 + 네이티브 실행 스크립트
-tests/          단위 테스트
-```
+## 기타
 
-## 설계 제약
+- **테스트** — `python -m unittest discover -s tests` (662건 · 62건 건너뜀) 와
+  `ruff check processing tests`. `.env` 를 환경변수로 올린 셸에서 돌리면 이미지 모델 테스트
+  4건이 매번 실패하므로, 테스트는 설정을 올리지 않은 셸에서 돌립니다.
 
-- **학습 기반 방식을 쓰지 않습니다** — 사전학습 모델은 추론 전용입니다.
-- 도메인을 코드로 분기하지 않습니다 — 고정 뼈대 + **도메인 팩**이 스테이지 전략을 고릅니다.
-- 코드·주석·로그는 한국어로 작성합니다.
+- **core 와의 버전 관계** — core 태그가 먼저 올라간 뒤 이 레포를 맞춥니다.
 
-## 트러블슈팅
+## 자주 겪는 문제
 
-### `ValueError: 필수 환경변수 누락: META_MODEL`
+| 증상 | 원인 |
+|---|---|
+| `필수 환경변수 누락` | 설정 파일을 환경변수로 올리지 않았습니다 |
+| `No module named 'src'` | core 라이브러리가 설치되지 않았습니다 |
+| 관계가 하나도 안 생김 | 주제 분류 기초 데이터를 넣지 않았습니다 |
+| Airflow 화면에 DAG 가 안 보임 | `DAGS_FOLDER` 경로나 `dag-processor` 실행 여부를 확인하십시오 |
+| 색인 설정을 고쳤는데 그대로임 | 재색인 결과가 `analysis-stale` 이면 `--recreate` 로 다시 만드십시오 |
 
-설정이 **하나도** 로드되지 않았다는 뜻입니다. 값이 틀린 게 아니라 대개 `.env` 파일을 못 찾은 것입니다.
+## 제3자 오픈소스
 
-1. `.env.dev` 가 **실행하는 디렉터리** 또는 레포 루트에 있는지 확인하십시오(`cp .env.example .env.dev`).
-2. `--env dev` 로 실행했는지 확인하십시오 — `--env prod` 는 `.env.prod` 를 찾습니다.
-3. 그래도 안 되면 환경변수를 직접 주입하십시오: `set -a; . ./.env.dev; set +a`
-   (§환경변수 › 방법 B — 설치 방식과 무관하게 항상 동작합니다).
+전체 목록과 라이선스 전문은 `NOTICE` 파일에 있습니다.
 
-### 코어를 못 찾습니다 (`ModuleNotFoundError: No module named 'src'`)
+| 구성요소 | 라이선스 |
+|---|---|
+| PyTorch · SceneDetect · soundfile | BSD 3-Clause |
+| Apache Airflow · OpenCV · pytesseract · sentence-transformers | Apache License 2.0 |
+| faster-whisper | MIT |
+| psycopg | LGPL 3.0 |
 
-이 레포는 코어(`dataplatform-core`)를 필요로 합니다. §설치 순서대로 **코어를 먼저** 설치하십시오.
+psycopg 는 LGPL 입니다. 파이썬에서 불러 쓰는 것은 이 소프트웨어의 라이선스에 영향을 주지
+않지만, 사용 사실을 `NOTICE` 에 밝혀야 합니다.
 
-### 관계 생성 결과가 0건입니다
-
-**코어 레포에서** 닫힌 주제 분류체계 시드를 적재하지 않았을 때 나타납니다:
-`python -m scripts.seed_topic_registry --env dev --apply`
-
-### DAG 가 Airflow UI 에 보이지 않습니다
-
-DAG 파일이 import 단계에서 실패하면 목록에 나타나지 않습니다. 먼저 로컬에서 확인하십시오:
-`python -c "from airflow.dag_processing.dagbag import DagBag; b=DagBag(dag_folder='deploy/airflow/dags'); print(sorted(b.dag_ids), b.import_errors)"`
-(Airflow 3.1 이전은 `airflow.models.dagbag` 경로입니다.)
-
-## 이 레포에 대해
-
-이 레포는 이 프로젝트의 **공개 개발 레포**입니다 — 소스는 여기서 직접 개발합니다(2026-08-06 이후). 코드·테스트·
-Airflow DAG 와 "어떻게 돌리나"(이 README)만 담고, **왜 이렇게 설계했나**(기획·설계 문서·설계 변경 이력·결정 기록)는
-별도 비공개 문서 레포에 있습니다. 그래서 커밋 메시지는 짧고, 근거는 `근거: 설계이력 YYYY-MM-DD` 한 줄로 그 문서를 가리킵니다.
-
-- 코어는 git 태그(`vMAJOR.MINOR.PATCH`)를 기준으로 설치합니다. 코어 공개 API 변경은 코어 `CHANGELOG.md` 에 있습니다.
-- 문의는 과제 담당자에게 해주십시오.
+ffmpeg 와 tesseract 는 이 소프트웨어에 포함되지 않고 실행 환경에 설치해 사용합니다.
+각각의 라이선스는 해당 프로젝트를 따릅니다.
