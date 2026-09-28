@@ -1,4 +1,4 @@
-# dataplatform-pipeline
+# pipeline
 
 멀티모달 데이터 통합 플랫폼에서 파일을 받아 검색 가능한 상태로 만드는 처리 레포입니다.
 
