@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from processing.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
 from processing.skills.meta_split import split_core_ext
+from processing.skills.title_context import summarizer_kwargs, title_for_summary
 from src.config.settings import active_embed_channel, active_embed_model, get_current_settings
 
 
@@ -30,7 +31,9 @@ def _extract_text_meta(ctx: ExtractContext) -> AssetRecord:
         embedding_model_name=active_embed_model(cfg),
     )
     # | 연산자로 dict 머지 — 오른쪽(요약)이 같은 키를 덮어쓴다.
-    meta = meta | summarize_and_extract_keywords(file_path=ctx.file_path, file_kind=file_kind)
+    # 제목 참고(spec 114) — 설정을 켜기 전엔 인자를 넘기지 않아 지금과 같다.
+    title = title_for_summary(ctx.file_path, cfg)
+    meta = meta | summarize_and_extract_keywords(file_path=ctx.file_path, file_kind=file_kind, **summarizer_kwargs(title))
     core_meta, ext_meta = split_core_ext(meta)
     # embeddings=[] — embed 슬롯은 _embed_text 가 별도로 채운다(분리 설계).
     return AssetRecord(core_meta=core_meta, ext_meta=ext_meta, tags=[], embeddings=[])

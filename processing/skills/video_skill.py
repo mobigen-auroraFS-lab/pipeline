@@ -10,6 +10,7 @@ import logging
 
 from processing.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
 from processing.skills.meta_split import split_core_ext
+from processing.skills.title_context import summarizer_kwargs, title_for_summary
 from src.config.settings import active_embed_channel, active_embed_model, get_current_settings
 
 _CHANNEL_CLIP = "clip"
@@ -80,7 +81,8 @@ def _extract_video_meta(ctx: ExtractContext) -> AssetRecord:
         )
 
     meta = extract_video_basic_meta(file_path=file)
-    meta = meta | summarize_video_from_scene_results(result)
+    # 제목 참고(spec 114) — 장면 분석 결과와 제목이 맞는지(title_match)도 같은 호출에서 판단한다.
+    meta = meta | summarize_video_from_scene_results(result, **summarizer_kwargs(title_for_summary(file, cfg)))
     clip_ve = embed_video_keyframes_clip(result, korean_labels_per_frame=korean_labels_per_frame)
 
     # 키프레임 라벨 score 하한 + top-k

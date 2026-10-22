@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 # 분류 정책 버전 — 프롬프트나 후보 구성이 바뀌면 올린다. 저장된 결과가 어느 규칙으로 나온
 # 것인지 되짚을 유일한 단서다.
 POLICY_VERSION = "asset_topic.v1"
+# spec 114: 자기 텍스트 앞에 **내용과 맞다고 확인된 제목**을 붙여 판정한 결과. 제목이 없으면 v1 그대로다.
+POLICY_VERSION_TITLE = "asset_topic.v2"
 
 # ⚠️ 후보를 좁히지 않으므로 이 값은 **쓰이지 않는다**. 호출부 시그니처를 깨지 않으려고
 # 기본값만 남겨 둔 것이다.
@@ -87,6 +89,22 @@ def build_self_text(
             parts.append(" ".join(labs))
 
     return " ".join(parts).strip()
+
+
+def with_title(self_text: str, title: str | None) -> str:
+    """자기 텍스트 앞에 확인된 제목을 붙인다(순수 · spec 114). 제목이 없거나 자기 텍스트가 비면 그대로.
+
+    왜 앞에 붙이나: 요약 · 키워드만 보면 판정이 드라마 리뷰를 「소설 · 픽션」, 금속활자 사진을 「반도체」로
+    고르기도 한다 — 제목이 「무엇에 관한 자료인가」를 가장 짧게 말해 준다. 확인된(``title_match == yes``)
+    제목만 붙이므로 틀린 제목이 주제를 끌고 가지 않는다.
+
+    Args:
+        self_text: ``build_self_text`` 결과.
+        title: ``confirmed_title`` 결과(확인되지 않았으면 ``None``).
+    """
+    if not title or not self_text or not self_text.strip():
+        return self_text
+    return f"제목: {title}\n{self_text}"
 
 
 def topic_candidates_for_self_text(
@@ -369,6 +387,31 @@ def _load_self_meta(conn, asset_id) -> tuple[str | None, list | None, list | Non
     return row.get("summary"), row.get("keywords"), row.get("labels")
 
 
+def _load_title_context(conn, asset_id) -> tuple[str | None, str | None]:
+    """제목 판단(``ext_meta.title_match``)과 파일 경로를 읽는다 — DB 경로에서 확인된 제목을 정할 재료(spec 114).
+
+    Args:
+        conn: DB 연결.
+        asset_id: 대상 자산.
+
+    Returns:
+        ``(title_match, fs_path)``. 행이 없으면 ``(None, None)``.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT m.ext_meta->>'title_match' AS title_match, a.fs_path
+            FROM asset a LEFT JOIN asset_metadata m ON m.asset_id = a.asset_id
+            WHERE a.asset_id = %s
+            """,
+            (asset_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None, None
+    return row.get("title_match"), row.get("fs_path")
+
+
 def _coerce_confidence(value: Any) -> float | None:
     """confidence 를 float 로 강제(파싱 실패·부재 → None)."""
     if value is None:
@@ -387,6 +430,8 @@ def _upsert_asset_topic(
     subtopic_ko: str | None,
     subtopic_en: str | None,
     confidence: float | None,
+    *,
+    policy_version: str = POLICY_VERSION,
 ) -> None:
     """자산 주제를 저장한다 — 자산당 한 행(다시 분류하면 덮어쓴다).
 
@@ -403,6 +448,7 @@ def _upsert_asset_topic(
         subtopic_ko: 소분류. 미부여면 ``None``.
         subtopic_en: 소분류 영문. 미부여·미등록이면 ``None``.
         confidence: LLM 이 준 신뢰도. 파싱 실패면 ``None``.
+        policy_version: 분류 정책 판. 확인된 제목을 붙여 판정했으면 ``POLICY_VERSION_TITLE``(spec 114).
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -428,13 +474,13 @@ def _upsert_asset_topic(
                 subtopic_ko,
                 subtopic_en,
                 confidence,
-                POLICY_VERSION,
+                policy_version,
             ),
         )
 
 
 def classify_asset_topic(
-    conn, asset_id, *, self_text: str | None = None, settings=None, client=None
+    conn, asset_id, *, self_text: str | None = None, title: str | None = None, settings=None, client=None
 ) -> dict | None:
     """자산 주제를 판정해 저장한다 — 대분류·소분류 모두 닫힌 후보에서 고른다. 미부여면 None.
 
@@ -445,15 +491,27 @@ def classify_asset_topic(
 
     Args:
         self_text: (선택) 이미 구성된 자기 텍스트. None 이면 ``asset_metadata`` 에서 로드해 구성한다.
-        settings: (예약) 후보수 등 정책 파라미터 주입용(현재는 기본값 사용).
+        title: (선택) **내용과 맞다고 확인된** 제목(spec 114 · ``title_context.confirmed_title``). 주면 자기 텍스트
+            앞에 붙이고 판 ``POLICY_VERSION_TITLE`` 로 남긴다. ``self_text`` 를 주지 않은 DB 경로에서 ``None`` 이면
+            저장된 ``title_match`` 와 설정으로 스스로 정한다.
+        settings: 정책 파라미터 주입용 — 지금은 제목 참고 설정(``vlm.summary_title_hint``)을 DB 경로에서 본다.
+            ``None`` 이면 현재 설정.
         client: LLM 클라이언트 주입 seam(미주입=운영 클라이언트·temp=0).
     """
     # ① 자기 텍스트 확보(미주입 시 메타 로드 후 구성). 비면 미부여(LLM 미호출).
     if self_text is None:
         summary, keywords, labels = _load_self_meta(conn, asset_id)
         self_text = build_self_text(summary, keywords, labels)
+        if title is None:
+            from processing.skills.title_context import confirmed_title, hint_enabled
+            from src.config.settings import get_current_settings
+            cfg = settings or get_current_settings()
+            if hint_enabled(cfg):  # 꺼져 있으면 조회도 하지 않는다 — 지금과 같은 쿼리 수
+                title_match, fs_path = _load_title_context(conn, asset_id)
+                title = confirmed_title({"title_match": title_match}, fs_path, cfg)
     if not self_text or not str(self_text).strip():
         return None
+    self_text = with_title(self_text, title)
 
     # ② 닫힌 대분류 전체를 후보로. 비어 있으면 미부여(레지스트리가 시드되지 않은 상태).
     candidates = topic_candidates_for_self_text(conn, self_text, k=_DEFAULT_TOPIC_K)
@@ -494,7 +552,8 @@ def classify_asset_topic(
 
     # ⑥ 멱등 upsert(policy_version 기록).
     _upsert_asset_topic(
-        conn, asset_id, topic_ko, topic_en, subtopic_ko, subtopic_en, confidence
+        conn, asset_id, topic_ko, topic_en, subtopic_ko, subtopic_en, confidence,
+        policy_version=POLICY_VERSION_TITLE if title else POLICY_VERSION,
     )
 
     return {

@@ -36,6 +36,7 @@ from processing.pipeline import builtins as _builtins  # noqa: F401 — DEFAULT_
 from processing.pipeline.packs import for_domain
 from processing.pipeline.policy import validate as policy_validate
 from processing.pipeline.registry import DEFAULT_REGISTRY
+from processing.skills.title_context import confirmed_title
 from src.database.lineage_activity import LineageActivity  # 계보 활동명 정본(3레포 공용)
 from src.database.lineage_persist import record_lineage
 from src.database.postgres_util import PostgresUtil
@@ -338,9 +339,13 @@ def process_asset(
             record.ext_meta.get("keywords"),
             record.ext_meta.get("labels"),
         )
+        # 요약기가 내용과 맞다고 확인한 제목만 붙인다(spec 114 · 설정을 켜기 전엔 None 이라 지금과 같다).
+        title = confirmed_title(record.ext_meta, fs_path, settings)
         with db.transaction() as conn:
+            # 제목이 없으면 인자 자체를 넘기지 않는다 — 호출 모양이 지금과 같다(설정을 켜기 전).
             classify_asset_topic(
-                conn, asset_id, self_text=self_text, settings=settings, client=None
+                conn, asset_id, self_text=self_text, settings=settings, client=None,
+                **({"title": title} if title else {}),
             )
     except Exception as exc:  # noqa: BLE001 — 분류 실패가 적재를 뒤집지 않게 전부 흡수
         _LOG.warning("자기주제 분류 실패(무시): asset_id=%s (%s)", asset_id, exc)

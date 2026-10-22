@@ -123,7 +123,8 @@ _TARGET_BASE_SQL = """
 SELECT a.asset_id,
        a.fs_path,
        m.ext_meta->>'summary' AS summary,
-       m.ext_meta->'keywords' AS keywords
+       m.ext_meta->'keywords' AS keywords,
+       m.ext_meta->>'title_match' AS title_match
 FROM asset a
 JOIN asset_metadata m ON m.asset_id = a.asset_id
 WHERE a.status = 'registered'
@@ -587,7 +588,9 @@ def fetch_binding_targets(
             "keywords": [str(k) for k in (r["keywords"] or []) if k is not None],
             # 뜻 있는 파일 이름만 담는다(뜻이 없으면 None) — 판정 프롬프트의 참고 줄 재료다.
             # 게이트가 코어 순수 함수라 여기서 다시 판단하지 않는다.
-            "name_hint": (hint := meaningful_file_name(r.get("fs_path"))),
+            # spec 114: 요약기가 제목이 내용과 **다르다**(title_match == no)고 판단한 자산은 파일명을 쓰지 않는다 —
+            # 틀린 파일명이 개체를 오염시키던 경로를 막는다. 판단이 없으면 지금과 같다.
+            "name_hint": (hint := None if r.get("title_match") == "no" else meaningful_file_name(r.get("fs_path"))),
             # 이름이 사는 자리(괄호·해시태그·구분자 토막)를 후보로 떼어 **판정 대상**에 더한다.
             "name_candidates": file_name_candidates(hint),
         }
