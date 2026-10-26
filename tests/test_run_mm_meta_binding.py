@@ -237,6 +237,38 @@ class TestRunBindingPipelineOrder(unittest.TestCase):
         # 근거 키워드는 원문 그대로 보존된다(reason 스탬프의 kw=).
         self.assertEqual(persist.calls[0][1][0].keyword, "이지은")
 
+    def test_contained_registered_entity_added_before_persist(self) -> None:
+        # 제목 참고 요약(spec 114)이 제목 전체를 개체 하나로 낳는다 — 그 안의 등록 개체를 더해 소속을 지킨다.
+        judged = _ok(ExtractedEntity(keyword="남구만 초상", name="남구만 초상", entity_type="작품"))
+        alias = _LookupOnlyIndex({("인물", "남구만"): "남구만"})
+        persist = _FakePersist()
+        report = rb.run_binding(
+            [_material(_A1), _material(_A2)],
+            mode=rb.DISCOVERY_PROPOSE,
+            alias_index=alias,
+            judge_fn=lambda *a, **k: judged,
+            persist_fn=persist,
+        )
+        self.assertEqual([f"{e.entity_type}:{e.name}" for e in persist.calls[0][1]], ["인물:남구만"])
+        self.assertEqual(report["withheld"], 2)  # 원래 판정(작품:남구만 초상)은 미등록 후보로 남는다
+        self.assertEqual(report["contain_linked"], 2)
+        self.assertEqual(report["contain_links"][0]["to"], "남구만")
+        self.assertEqual(report["contain_links"][0]["assets"], 2)
+        self.assertEqual(len(report["contain_links"][0]["asset_ids"]), 2)
+        self.assertIn("포함 이름 잇기 2건 · 1쌍: 남구만 초상→인물:남구만(2)", rb.format_report(report))
+
+    def test_no_contained_link_keeps_report_quiet(self) -> None:
+        judged = _ok(ExtractedEntity(keyword="파리", name="파리", entity_type="장소"))
+        report = rb.run_binding(
+            [_material(_A1)],
+            mode=rb.DISCOVERY_PROPOSE,
+            alias_index=_LookupOnlyIndex({("인물", "남구만"): "남구만"}),
+            judge_fn=lambda *a, **k: judged,
+            persist_fn=_FakePersist(),
+        )
+        self.assertEqual((0, []), (report["contain_linked"], report["contain_links"]))
+        self.assertNotIn("포함 이름 잇기", rb.format_report(report))
+
     def test_official_index_is_lookup_only_across_assets(self) -> None:
         # T017 결함 ② 회귀 봉인 — 자산이 여러 건이어도 색인을 훑거나 복사하지 않는다.
         official = _LookupOnlyIndex({("장소", "서울"): "서울특별시"})

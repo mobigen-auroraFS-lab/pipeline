@@ -41,6 +41,7 @@ from processing.pipeline import (
     builtins as _builtins,  # noqa: F401 — DEFAULT_REGISTRY 등록 부수효과(import 계약)
 )
 from processing.pipeline.registry import DEFAULT_REGISTRY
+from processing.skills.title_context import hint_enabled, missing_title_keys
 from src.config.settings import get_current_settings
 from src.database.lineage_activity import LineageActivity  # 계보 활동명 정본(3레포 공용)
 from src.database.lineage_persist import record_lineage
@@ -91,6 +92,13 @@ def run_ingest(
     """
     _configure_logging()
     cfg = settings or get_current_settings()
+    # spec 114: 제목 참고를 켰는데 ext_meta 키(v308)가 등록되지 않았으면 시작하지 않는다 — 그대로 돌면 적재가
+    # 「미등록 키」로 전부 롤백된다. 꺼져 있으면 확인하지 않는다(지금과 같다).
+    if hint_enabled(cfg):
+        with db.transaction() as conn:
+            missing = missing_title_keys(conn)
+        if missing:
+            raise RuntimeError(f"제목 참고가 켜져 있는데 ext_meta 키가 등록되지 않았다: {missing} — 코어 마이그레이션 v308 을 먼저 적용하세요")
     result: dict[str, list[Any]] = {"registered": [], "failed": [], "skipped": [], "deferred": []}
     # OpenSearch 증분 색인기 — 배치당 1회 생성(opt-in off 면 no-op·미import). 클라이언트는 첫 색인에서
     # 만들어 배치 전체 재사용(자산마다 새 연결 X). process_asset 의 finalize 직후 os_index(asset_id) 로 호출.

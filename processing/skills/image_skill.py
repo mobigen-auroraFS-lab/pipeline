@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from processing.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
 from processing.skills.meta_split import split_core_ext
+from processing.skills.title_context import summarizer_kwargs, title_for_summary
 from src.config.settings import active_embed_channel, active_embed_model, get_current_settings
 
 _CHANNEL_CLIP = "clip"
@@ -35,7 +36,8 @@ def _extract_image_meta(ctx: ExtractContext) -> AssetRecord:
 
     # 1) 파일·이미지 속성 메타  2) VLM 캡션·키워드·객체
     meta = extract_image_meta(file_path=file)
-    summary = summarize_image_caption_keywords_objects(file_path=file)
+    # 제목 참고(spec 114) — 같은 호출에서 제목이 그림과 맞는지(title_match)도 판단한다.
+    summary = summarize_image_caption_keywords_objects(file_path=file, **summarizer_kwargs(title_for_summary(file, cfg)))
     objects = summary.get("objects") or []
     meta = meta | summary
 
@@ -60,6 +62,40 @@ def _extract_image_meta(ctx: ExtractContext) -> AssetRecord:
     return AssetRecord(core_meta=core_meta, ext_meta=ext_meta, tags=[], embeddings=[])
 
 
+def image_text_embedding(meta: dict, cfg) -> EmbeddingItem:
+    """그림 설명 · 키워드 · 라벨을 글로 묶어 텍스트 채널 임베딩 하나를 만든다.
+
+    적재(``_embed_image``)와 재요약 배치(``run_resummarize`` — 사진 요약을 다시 만들면 이 벡터도 다시 만들어야
+    한다)가 **같은 규칙**을 쓰도록 한 곳에 둔다. 규칙이 갈리면 같은 사진이 적재 시점에 따라 다른 벡터를 갖는다.
+
+    Args:
+        meta: 요약 · 키워드 · 라벨이 든 메타(키가 없어도 된다).
+        cfg: 설정 — 활성 임베딩 채널 · 모델 · 정규화 여부를 여기서 읽는다.
+
+    Returns:
+        활성 채널의 임베딩 항목(``chunk_index=0`` — 사진은 단일 청크). 설명이 텅 비면 공백 한 칸으로 만든다
+        — 저장은 성공해야 하기 때문이다.
+    """
+    from processing.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding
+    from src.embedders.text_embedder import embed_texts_for, pad_embedding_to_storage_dim
+
+    channel = active_embed_channel(cfg)
+    model = active_embed_model(cfg)  # EmbeddingItem.model_name 라벨(채널의 모델명)
+    chunk_content = build_image_vlm_text_for_embedding(meta)
+    if not chunk_content.strip():
+        chunk_content = " "
+    # 캡션 임베딩도 채널이 정한 백엔드(로컬 모델/원격 API)로 보낸다 — 적재와 질의가 같은 모델을 써야
+    #   (텍스트·오디오와 동일). 어느 모델을 쓸지는 임베딩 함수가 채널로 해소한다.
+    st_raw = embed_texts_for(
+        [chunk_content],
+        channel=channel,
+        settings=cfg,
+        normalize_embeddings=cfg.embed.normalize,
+    )[0]
+    # chunk_index=0: 이미지는 단일 청크(비텍스트 미디어 공통).
+    return EmbeddingItem(channel=channel, vector=pad_embedding_to_storage_dim(st_raw), model_name=model, chunk_index=0)
+
+
 def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
     """이미지 임베딩을 만든다 — 기본은 텍스트·시각 2채널, 시각 채널을 끄면 텍스트 하나만.
 
@@ -78,32 +114,15 @@ def _embed_image(ctx: ExtractContext, rec: AssetRecord) -> list[EmbeddingItem]:
     Raises:
         RuntimeError: 같은 문맥으로 추출을 먼저 돌리지 않았을 때.
     """
-    from processing.preprocess.vlm_text_for_embedding import build_image_vlm_text_for_embedding
     from src.config.embedding_constants import DEFAULT_CLIP_MODEL_NAME
-    from src.embedders.text_embedder import embed_texts_for, pad_embedding_to_storage_dim
 
     cfg = ctx.settings or get_current_settings()
-    channel = active_embed_channel(cfg)
-    model = active_embed_model(cfg)  # EmbeddingItem.model_name 라벨(채널의 모델명)
-    meta = dict(rec.core_meta) | dict(rec.ext_meta)
-    chunk_content = build_image_vlm_text_for_embedding(meta)
-    if not chunk_content.strip():
-        chunk_content = " "
-    # 캡션 임베딩도 채널이 정한 백엔드(로컬 모델/원격 API)로 보낸다 — 적재와 질의가 같은 모델을 써야
-    #   (텍스트·오디오와 동일). 어느 모델을 쓸지는 임베딩 함수가 채널로 해소한다.
-    st_raw = embed_texts_for(
-        [chunk_content],
-        channel=channel,
-        settings=cfg,
-        normalize_embeddings=cfg.embed.normalize,
-    )[0]
-    st_vec = pad_embedding_to_storage_dim(st_raw)
+    text_item = image_text_embedding(dict(rec.core_meta) | dict(rec.ext_meta), cfg)
     # 계약 위반 즉시 탐지: extract 없이 embed 만 단독 호출하면 RuntimeError.
     clip_vec = ctx.scratch.get("clip_vec")
     if clip_vec is None:
         raise RuntimeError("_embed_image: ctx.scratch['clip_vec'] 없음 — _extract_image_meta 를 같은 ctx 로 먼저 실행해야 합니다.")
-    # chunk_index=0: 이미지는 단일 청크(비텍스트 미디어 공통).
-    items = [EmbeddingItem(channel=channel, vector=st_vec, model_name=model, chunk_index=0)]
+    items = [text_item]
     # 시각 채널 토글. 끄면 그 항목만 빠지고 나머지 계약은 그대로다.
     if cfg.embed.enable_clip:
         items.append(

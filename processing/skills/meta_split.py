@@ -9,7 +9,8 @@ from typing import Any
 
 # 도메인 신호(ext_meta)로 보낼 키. 나머지는 core_meta.
 EXT_META_KEYS: frozenset[str] = frozenset(
-    {"summary", "keywords", "labels", "objects", "keyframes", "stt", "caption"}
+    # title_match · title_only: 요약기가 제목을 참고했을 때의 판단(spec 114) — 내용 신호라 확장 메타로.
+    {"summary", "keywords", "labels", "objects", "keyframes", "stt", "caption", "title_match", "title_only"}
 )
 
 

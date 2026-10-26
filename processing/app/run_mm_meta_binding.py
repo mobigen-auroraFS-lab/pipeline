@@ -7,7 +7,8 @@
 한 자산의 처리 순서(한 단계도 건너뛰면 안 된다)::
 
     판정(LLM 1회/자산) → apply_rules(광역 제외·스톱패턴·접미 병합) →
-    resolve_registered_aliases(등록 메타 별칭 합류) → 발굴 모드 분기 → upsert_entity_edges(자산 스코프 교체)
+    resolve_registered_aliases(등록 메타 별칭 합류) → resolve_registered_contained(포함 이름 잇기)
+    → 발굴 모드 분기 → upsert_entity_edges(자산 스코프 교체)
 
 ⚠️ **병합 색인·별칭 색인은 배치 시작에 한 번만 만든다.** 자산마다 만들면 자산 수 × 개체 수로
 발산한다(자산 10만 × 개체 10만 = 100억 · 코어 T017 이 고친 결함). 이 러너는 색인을 **찾아보기만**
@@ -44,6 +45,7 @@ IO 경계를 나눠 뒀다: 조립부(``run_binding``·``run_describe``)는 DB·
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from collections.abc import Callable, Mapping, Sequence
@@ -73,6 +75,7 @@ from src.mm_meta import (
     judge_asset_entities,
     prompt_version_for,
     resolve_registered_aliases,
+    resolve_registered_contained,
     type_names,
     upsert_entity_edges,
     upsert_meta_description,
@@ -123,7 +126,8 @@ _TARGET_BASE_SQL = """
 SELECT a.asset_id,
        a.fs_path,
        m.ext_meta->>'summary' AS summary,
-       m.ext_meta->'keywords' AS keywords
+       m.ext_meta->'keywords' AS keywords,
+       m.ext_meta->>'title_match' AS title_match
 FROM asset a
 JOIN asset_metadata m ON m.asset_id = a.asset_id
 WHERE a.status = 'registered'
@@ -320,6 +324,8 @@ def run_binding(
         raise ValueError("쓰기 모드인데 저장부(persist_fn)가 없다 — 조용한 0건 배치를 막는다")
 
     aliases: Mapping[tuple[str, str], str] = alias_index if alias_index is not None else {}
+    # 포함 이름 잇기가 맞춰 볼 종류 — 정렬해 고정한다(같은 입력이면 같은 결과).
+    entity_types = tuple(sorted(type_names(type_defs)))
     # seam 기본값 해소: None 이면 모듈 수준 이름을 **호출 시점에** 잡는다(def 기본값으로 묶으면
     # 테스트가 바꿔 끼운 이름이 무시된다 · run_relations 의 _domain_fn 과 같은 이유).
     judge = judge_fn if judge_fn is not None else judge_asset_entities
@@ -340,8 +346,11 @@ def run_binding(
         "edges_inserted": 0,
         "edges_deleted": 0,
         "withheld": 0,
+        "contain_linked": 0,
     }
     failures: dict[str, int] = {}
+    # 포함 이름 잇기(「작품:남구만 초상」 → 등록 「인물:남구만」)로 더한 쌍 — 사람이 잘못 이은 것을 찾게 보고한다.
+    contain_links: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     # 배치 안에서 센 묶음(= 이번에 소속이 생긴 자산 수). 실제 묶음 크기는 DB 가 정본이고, 여기 값은
     # "이번 배치가 무엇을 많이 채웠나"다 — 리포트 이름(top_bundles)에 그 뜻을 담는다.
     bundles: dict[tuple[str, str], dict[str, Any]] = {}
@@ -373,6 +382,13 @@ def run_binding(
 
             entities = apply_rules(judgement.entities, official_index=official_index)
             entities = resolve_registered_aliases(entities, aliases)
+            entities, linked = resolve_registered_contained(entities, aliases, entity_types)
+            for link in linked:
+                slot = contain_links.setdefault(link, {"assets": 0, "asset_ids": []})
+                slot["assets"] += 1
+                if len(slot["asset_ids"]) < _MAX_CANDIDATE_ASSETS:
+                    slot["asset_ids"].append(asset_id)
+            report["contain_linked"] += len(linked)
             if mode == DISCOVERY_PROPOSE:
                 bound, withheld = split_by_registration(entities, aliases)
             else:
@@ -438,6 +454,10 @@ def run_binding(
     )
     report["candidates_total"] = len(ordered)
     report["candidates"] = ordered[:_MAX_CANDIDATES]
+    report["contain_links"] = [
+        {"from_type": ft, "from": fn, "to_type": tt, "to": tn, "assets": v["assets"], "asset_ids": v["asset_ids"]}
+        for (ft, fn, tt, tn), v in sorted(contain_links.items(), key=lambda kv: (-kv[1]["assets"], kv[0]))
+    ]
     return report
 
 
@@ -587,7 +607,9 @@ def fetch_binding_targets(
             "keywords": [str(k) for k in (r["keywords"] or []) if k is not None],
             # 뜻 있는 파일 이름만 담는다(뜻이 없으면 None) — 판정 프롬프트의 참고 줄 재료다.
             # 게이트가 코어 순수 함수라 여기서 다시 판단하지 않는다.
-            "name_hint": (hint := meaningful_file_name(r.get("fs_path"))),
+            # spec 114: 요약기가 제목이 내용과 **다르다**(title_match == no)고 판단한 자산은 파일명을 쓰지 않는다 —
+            # 틀린 파일명이 개체를 오염시키던 경로를 막는다. 판단이 없으면 지금과 같다.
+            "name_hint": (hint := None if r.get("title_match") == "no" else meaningful_file_name(r.get("fs_path"))),
             # 이름이 사는 자리(괄호·해시태그·구분자 토막)를 후보로 떼어 **판정 대상**에 더한다.
             "name_candidates": file_name_candidates(hint),
         }
@@ -655,6 +677,10 @@ def format_report(
         f" (줄어든 자산 {report.get('assets_shrunk', 0)})",
         f"  신규 메타 {len(report.get('new_metas', []))}건",
     ]
+    links = report.get("contain_links") or []
+    if links:
+        joined = ", ".join(f"{x['from']}→{x['to_type']}:{x['to']}({x['assets']})" for x in links[:5])
+        lines.append(f"  포함 이름 잇기 {report.get('contain_linked', 0)}건 · {len(links)}쌍: {joined}")
     if report.get("failures"):
         lines.append(f"  ⚠️ 실패 사유: {report['failures']}")
     top = report.get("top_bundles") or []
@@ -895,6 +921,10 @@ def _build_parser():
         "--no-describe", dest="no_describe", action="store_true",
         help="메타 설명 생성 단계를 건너뛴다(소속만 갱신)",
     )
+    p.add_argument(
+        "--report-json", dest="report_json", default=None,
+        help="결과 전체(포함 이름 잇기 쌍 · 미등록 후보 포함)를 JSON 파일로 남긴다 — 자산 id 가 들어가므로 저장소 밖 경로에",
+    )
     p.add_argument("asset_ids", nargs="*", metavar="ASSET_ID", default=[])
     return p
 
@@ -938,6 +968,9 @@ def main() -> int:
     report = result["binding"]
     describe_report = result["describe"] or {}
     print(format_report(report, describe=result["describe"], orphans=result["orphans"]))
+    if args.report_json:
+        with open(args.report_json, "w", encoding="utf-8") as fh:
+            json.dump(result, fh, ensure_ascii=False, indent=1, default=str)
     # 설명 단계 실패도 종료 코드에 반영한다. DAG 는 ``run_batch`` 를 직접 부르므로 영향이 없지만,
     # 사람이 CLI 를 돌려 ``$?`` 로 성공을 판단하는 경우 설명 실패가 조용히 성공으로 보였다
     # (``run_mm_classify`` 는 색인 실패까지 반영한다 — 두 러너의 규율을 맞춘다).

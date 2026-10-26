@@ -146,6 +146,7 @@ core 가 요구하는 값(core README 참고)에 더해 아래를 설정합니�
 | `DAG_PROCESS_LIMIT` | 한 번에 처리할 자산 수 |
 | `DAG_PROCESS_MAX_FAILURES` | 연속 실패 허용 횟수 |
 | `MM_META_DISCOVERY_MODE` | `propose`(후보만 보고, 기본값) 또는 `auto`(자동 등록) |
+| `SUMMARY_TITLE_HINT` | `1` 이면 요약할 때 파일 제목을 참고합니다(기본값 꺼짐). 켜기 전에 core 마이그레이션 `v308` 이 적용돼 있어야 합니다 — 없으면 적재가 시작하지 않습니다 |
 
 설정 파일의 값을 **프로세스 환경변수로 올려야** 합니다. Airflow 작업이 그 환경을
 물려받기 때문입니다.
@@ -174,6 +175,23 @@ python -m processing.app.run_entity_label     --env dev   # 개체 라벨 판정
 python -m processing.app.run_opensearch_resync --env dev              # 빠진 것만 채움
 python -m processing.app.run_opensearch_resync --env dev --recreate   # 지우고 다시 만듦
 ```
+
+이미 적재된 자산의 요약을 제목을 참고해 다시 만들 때는 재요약 배치를 씁니다. **DB 에 쓰므로
+백업한 뒤에** 돌리고, 먼저 `--dry-run` 으로 결과만 확인합니다.
+
+```bash
+SUMMARY_TITLE_HINT=1 python -m processing.app.run_resummarize --env dev --modality video,audio --dry-run --limit 20
+SUMMARY_TITLE_HINT=1 python -m processing.app.run_resummarize --env dev --workers 8 --out resummarize.jsonl
+# 끝나면 개체를 다시 판정합니다(기록 파일의 asset_id)
+python -m processing.app.run_mm_meta_binding --env dev --rejudge <자산 id …>
+```
+
+- 영상은 저장된 장면 분석, 음성은 저장된 음성 인식 결과, 문서와 사진은 원본 파일로 요약을 다시 만듭니다.
+- 사진은 요약이 검색 벡터의 재료라서 텍스트 임베딩도 함께 다시 만듭니다. `--modality` 로 종류를 고를 수 있습니다(기본값은 네 종류 전부).
+- 이미 처리한 자산과 뜻 있는 제목이 없는 자산은 건너뜁니다.
+- 색인만 실패한 자산은 `<기록 파일>.index_failed.txt` 에 남습니다. `--index-only --asset-ids-file <그 파일>` 로 색인만 다시 합니다.
+- 일부 자산이 실패하면 종료 코드 1 로 끝납니다.
+- `--workers` 는 DB 연결 풀 크기 이하로 둡니다(자산마다 주제 판정이 끝날 때까지 연결 하나를 씁니다).
 
 재색인 도구는 검색 결과를 합치는 데 쓰는 설정(`assets-hybrid`)도 함께 등록합니다. 이것이
 없으면 파일 검색 API 가 500 오류를 냅니다. 이미 직접 관리하고 있다면

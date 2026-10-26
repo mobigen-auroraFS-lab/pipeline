@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from processing.dispatch.types import AssetRecord, EmbeddingItem, ExtractContext
 from processing.skills.meta_split import split_core_ext
+from processing.skills.title_context import summarizer_kwargs, title_for_summary
 from src.config.settings import active_embed_channel, active_embed_model, get_current_settings
 
 
@@ -24,11 +25,14 @@ def _extract_audio_meta(ctx: ExtractContext) -> AssetRecord:
     from src.llm.text_summarizer import summarize_and_extract_keywords_from_audio
 
     file = ctx.file_path
+    cfg = ctx.settings or get_current_settings()
     stt_result = transcribe_audio_local(file_path=file)
     meta = extract_audio_meta(file_path=file)
     # 무내용 가드: 전사가 비었거나 너무 짧으면 요약기가 LLM 을 부르지 않고
     # summary='' 를 돌려준다(기악 오디오 등 placeholder 요약 원천 차단). 빈 summary → 자기주제 미부여.
-    meta = meta | summarize_and_extract_keywords_from_audio(text=stt_result["text"])
+    # 제목 참고(spec 114) — 빈 전사라도 뜻 있는 제목이 있으면 제목만으로 한 문장 요약(노래 음원).
+    title = title_for_summary(file, cfg)
+    meta = meta | summarize_and_extract_keywords_from_audio(text=stt_result["text"], **summarizer_kwargs(title))
 
     ctx.scratch["stt_text"] = stt_result["text"]  # 임베딩 슬롯 재사용(whisper 재실행 방지)
 
