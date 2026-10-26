@@ -77,6 +77,14 @@ class FetchTargetsTest(unittest.TestCase):
         self.assertEqual(["a2"], [r["asset_id"] for r in out])
 
 
+    def test_제외_이름은_NFC_로_맞춰_비교한다(self) -> None:
+        import unicodedata
+        nfd = unicodedata.normalize("NFD", "봉화 쌍벽당 종택.txt")
+        rows = [{"asset_id": "a1", "modality": "text", "fs_path": f"/x/{nfd}", "domain_label": "general", "ext_meta": {}}]
+        conn, _ = self._conn(rows)
+        self.assertEqual([], RR.fetch_targets(conn, ["text"], exclude_names={"봉화 쌍벽당 종택.txt"}))
+
+
 class BuildUpdatesTest(unittest.TestCase):
     def test_설정이_꺼져_있으면_시작하지_않는다(self) -> None:
         with self.assertRaises(RR.TitleHintOffError):

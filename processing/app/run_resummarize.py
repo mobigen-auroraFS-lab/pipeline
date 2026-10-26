@@ -36,8 +36,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 import threading
+import unicodedata
 import uuid
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
@@ -57,6 +59,8 @@ from processing.skills.title_context import (
 )
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 from src.config.filename_util import display_file_name, summary_title
+
+_LOG = logging.getLogger("meta_extract.run_resummarize")
 
 # 요약기 결과 중 확장 메타에 쓰는 키 — 이 밖의 키(about · labels · keyframes · stt …)는 건드리지 않는다.
 SUMMARY_KEYS = ("summary", "keywords", "objects", "title_match", "title_only")
@@ -118,12 +122,13 @@ def fetch_targets(
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, tuple(params))
         rows = cur.fetchall()
-    excluded = set(exclude_names or ())
+    # 제외 목록 · 경로 모두 NFC 로 모아 비교한다 — macOS 파일명(NFD)이면 같은 이름이 조용히 안 빠진다.
+    excluded = {unicodedata.normalize("NFC", n) for n in (exclude_names or ())}
     return [
         {"asset_id": str(r["asset_id"]), "modality": r["modality"], "fs_path": r["fs_path"],
          "domain_label": r["domain_label"], "ext_meta": r["ext_meta"] or {}}
         for r in rows
-        if display_file_name(r["fs_path"]) not in excluded
+        if unicodedata.normalize("NFC", display_file_name(r["fs_path"])) not in excluded
         and (not titled_only or summary_title(str(r["fs_path"] or "")) is not None)
     ]
 
@@ -187,6 +192,9 @@ def apply_updates(
     순서가 뜻이 있다: 주제 판정(조회 + LLM)을 **먼저** 하고 쓰기는 맨 뒤에 몰아 둔다. PostgreSQL 은 읽기에 행
     잠금을 잡지 않으므로, 이렇게 하면 LLM 을 기다리는 동안 이 자산의 행이 잠겨 있지 않다(적재 등 다른 쓰기를
     막지 않는다). about 은 호출부가 트랜잭션 밖에서 미리 뽑아 넘긴다.
+
+    한계: 주제 판정은 조회 · LLM · 저장을 한 함수에서 하므로, LLM 을 기다리는 동안 이 트랜잭션의 **연결 하나**가
+    열려 있다(행 잠금은 없음). 동시 처리 수는 DB 연결 풀 크기 이하로 둔다.
 
     Args:
         conn: DB 연결(호출부 트랜잭션).
@@ -285,6 +293,7 @@ def process_asset(
                     index_fn(conn, asset["asset_id"])
             except Exception as exc:  # noqa: BLE001 — 색인 실패는 따로 모아 다시 색인한다(DB 는 이미 새 값)
                 index_error = repr(exc)[:300]
+                _LOG.warning("재요약 색인 실패 %s: %s", asset["asset_id"], type(exc).__name__)
     if write_line is not None:
         old = asset.get("ext_meta") or {}
         write_line({"asset_id": asset["asset_id"], "modality": asset["modality"],
@@ -306,7 +315,7 @@ def run_resummarize(
         targets: ``fetch_targets`` 결과.
         process_fn: 자산 하나를 처리하고 ``process_asset`` 모양(``{"updates", "index_error"}``)을 돌려주는 함수
             (실패는 예외로 · 건너뜀은 ``SkipAsset``).
-        workers: 동시 처리 수(LLM 서버 부하와 맞춘다 — 실측 동시 8 까지 거의 선형).
+        workers: 동시 처리 수(LLM 서버 부하에 맞춘다 · DB 연결 풀 크기 이하 — 자산마다 주제 판정 동안 연결 하나를 쓴다).
 
     Returns:
         ``{targets, ok, skipped, failed, index_failed, title_match:{yes,no,unsure}, title_only, by_modality}`` —
@@ -504,7 +513,7 @@ def main() -> int:
               f"--modality {args.modality} --asset-ids-file {path}")
     if not args.dry_run and not args.index_only:
         print(f"다음: 개체 재판정 — python -m processing.app.run_mm_meta_binding --env {args.env} --rejudge <자산 id …> "
-              f"(기록 파일 {args.out} 의 asset_id)")
+              f"(기록 파일 {args.out} 의 asset_id — 성공한 자산만 기록된다 · 실패 · 건너뜀은 빠져 있다)")
     return 1 if report["failed"] or report["index_failed"] else 0
 
 

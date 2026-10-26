@@ -191,6 +191,7 @@ python -m processing.app.run_mm_meta_binding --env dev --rejudge <자산 id …>
 - 이미 처리한 자산과 뜻 있는 제목이 없는 자산은 건너뜁니다.
 - 색인만 실패한 자산은 `<기록 파일>.index_failed.txt` 에 남습니다. `--index-only --asset-ids-file <그 파일>` 로 색인만 다시 합니다.
 - 일부 자산이 실패하면 종료 코드 1 로 끝납니다.
+- `--workers` 는 DB 연결 풀 크기 이하로 둡니다(자산마다 주제 판정이 끝날 때까지 연결 하나를 씁니다).
 
 재색인 도구는 검색 결과를 합치는 데 쓰는 설정(`assets-hybrid`)도 함께 등록합니다. 이것이
 없으면 파일 검색 API 가 500 오류를 냅니다. 이미 직접 관리하고 있다면

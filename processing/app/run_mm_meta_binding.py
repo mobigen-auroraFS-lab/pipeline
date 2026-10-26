@@ -7,7 +7,8 @@
 한 자산의 처리 순서(한 단계도 건너뛰면 안 된다)::
 
     판정(LLM 1회/자산) → apply_rules(광역 제외·스톱패턴·접미 병합) →
-    resolve_registered_aliases(등록 메타 별칭 합류) → resolve_registered_contained(포함 이름 잇기) → 발굴 모드 분기 → upsert_entity_edges(자산 스코프 교체)
+    resolve_registered_aliases(등록 메타 별칭 합류) → resolve_registered_contained(포함 이름 잇기)
+    → 발굴 모드 분기 → upsert_entity_edges(자산 스코프 교체)
 
 ⚠️ **병합 색인·별칭 색인은 배치 시작에 한 번만 만든다.** 자산마다 만들면 자산 수 × 개체 수로
 발산한다(자산 10만 × 개체 10만 = 100억 · 코어 T017 이 고친 결함). 이 러너는 색인을 **찾아보기만**
@@ -922,7 +923,7 @@ def _build_parser():
     )
     p.add_argument(
         "--report-json", dest="report_json", default=None,
-        help="결과 전체(포함 이름 잇기 쌍 · 미등록 후보 포함)를 JSON 파일로 남긴다",
+        help="결과 전체(포함 이름 잇기 쌍 · 미등록 후보 포함)를 JSON 파일로 남긴다 — 자산 id 가 들어가므로 저장소 밖 경로에",
     )
     p.add_argument("asset_ids", nargs="*", metavar="ASSET_ID", default=[])
     return p
